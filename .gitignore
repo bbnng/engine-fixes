@@ -1,0 +1,14 @@
+build/
+dist/
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+__pycache__/
