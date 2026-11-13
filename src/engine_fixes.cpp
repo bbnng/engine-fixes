@@ -1,7 +1,8 @@
 ﻿// Engine Fixes for Vampire: The Masquerade - Bloodlines (BLSE plugin).
-// Code-level bug fixes plus optional smoothing tweaks. Every hook is gated by the exact game build
-// (BLSE build profile for vampire.dll, SHA-256 for client.dll) and by whole-instruction byte checks,
-// so an unknown or already patched game leaves the affected fix off and logs why.
+// Code-level bug fixes plus optional smoothing tweaks. Every hook is gated by the game build (BLSE's
+// build profile for vampire.dll; for client.dll its hash, or since 1.0.1 the same build edited in
+// place by a newer Unofficial Patch) and by whole-instruction byte checks, so an unknown or already
+// patched game leaves the affected fix off and logs why.
 #include "blse_api.h"
 #include <windows.h>
 #include <bcrypt.h>
@@ -10,9 +11,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #pragma comment(lib, "bcrypt.lib")
 
-BLSE_PLUGIN_INFO("engine_fixes", "1.0.0", "Engine Fixes", "Engine and game-code bug fixes for Bloodlines", "0.6", nullptr);
+BLSE_PLUGIN_INFO("engine_fixes", "1.0.1", "Engine Fixes", "Engine and game-code bug fixes for Bloodlines", "0.6", nullptr);
 
 namespace {
 const BLSE_HostAPI* host;
@@ -47,38 +49,122 @@ bool server_profile_supported() {
 }
 
 // --- build check for client.dll (BLSE's profile covers vampire.dll) ---
-// Hash the on-disk module before using any known layout or address. The result is cached.
-bool hash_matches(HMODULE module, const unsigned char* expected) {
-    wchar_t path[MAX_PATH];
-    const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
-    if (!length || length >= MAX_PATH) return false;
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    BCRYPT_ALG_HANDLE alg = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0;
-    if (ok) ok = BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) >= 0;
-    unsigned char buffer[16384], digest[32];
-    DWORD got;
-    while (ok) {
-        if (!ReadFile(file, buffer, sizeof(buffer), &got, nullptr)) { ok = false; break; }
-        if (!got) break;
-        ok = BCryptHashData(hash, buffer, got, 0) >= 0;
-    }
-    if (ok) ok = BCryptFinishHash(hash, digest, sizeof(digest), 0) >= 0;
-    if (hash) BCryptDestroyHash(hash);
-    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
-    CloseHandle(file);
-    return ok && std::memcmp(digest, expected, sizeof(digest)) == 0;
-}
-const unsigned char client_sha256[32] = {
+// client.dll is the analyzed file (by hash; Unofficial Patch 12.0's is known too), or (1.0.1) the
+// same build that a newer Unofficial Patch edited in place: the same link time and sections, and at
+// most a tenth of its 4 KB blocks changed. Every client fix still checks the bytes it hooks or calls
+// before using them, so a fix whose code a patch changed stays off and logs why. A change deeper
+// inside a function is not detected. The result is cached: several fixes ask, and reading 3.4 MB
+// each time slowed the first frame.
+#include "client_blocks.inc"
+const unsigned char client_sha256[32] = { // the analyzed client.dll
     0xe8,0x8b,0xea,0xe0,0xdd,0x03,0xaf,0x06,0x49,0x3c,0x71,0xc5,0xe8,0xd8,0x7a,0x69,
     0x93,0xb5,0x4e,0x59,0x0c,0xb6,0xad,0x37,0xcd,0x35,0x13,0xc5,0x88,0x58,0x28,0x70};
+const unsigned char client_up12_sha256[32] = { // Unofficial Patch 12.0: 28 bytes changed, none used here
+    0x9c,0xe1,0xa5,0x9f,0xd3,0xf5,0x17,0x5a,0x15,0x5c,0x52,0x76,0xcb,0x6d,0x09,0x2e,
+    0x25,0xa0,0x09,0x83,0x55,0x85,0xa3,0x71,0xf9,0x3b,0x92,0x3d,0xfc,0x13,0x4f,0x01};
+const std::uint32_t client_timestamp = 0x41afaf63;
+// As in the PE section table: name, VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData.
+struct ClientSection { char name[8]; std::uint32_t size, address, raw_size, raw_offset; };
+const ClientSection client_sections[] = {{".text", 0x1e1bed, 0x1000, 0x1e2000, 0x1000},
+                                         {".rdata", 0x8a1ed, 0x1e3000, 0x8b000, 0x1e3000},
+                                         {".data", 0x414984, 0x26e000, 0x71000, 0x26e000},
+                                         {".reloc", 0x654f2, 0x683000, 0x66000, 0x2df000}};
+const std::size_t client_block_size = 4096;
+
+std::uint32_t le32(const unsigned char* p) {
+    return static_cast<std::uint32_t>(p[0] | p[1] << 8 | p[2] << 16) | static_cast<std::uint32_t>(p[3]) << 24;
+}
+// True if the file's headers are the analyzed client.dll's: the same link time and exactly the same
+// sections (a copy-protected or rebuilt client.dll differs here).
+bool same_client_layout(const unsigned char* head, std::size_t size) {
+    if (size < 0x40 || head[0] != 'M' || head[1] != 'Z') return false;
+    const std::size_t pe = le32(head + 0x3c);
+    if (pe > size || size - pe < 24 || std::memcmp(head + pe, "PE\0\0", 4) != 0 || head[pe + 4] != 0x4c || head[pe + 5] != 0x01) return false;
+    const std::size_t count = static_cast<std::size_t>(head[pe + 6] | head[pe + 7] << 8);
+    const std::size_t optional = static_cast<std::size_t>(head[pe + 20] | head[pe + 21] << 8);
+    const std::size_t table = pe + 24 + optional;
+    if (le32(head + pe + 8) != client_timestamp || count != _countof(client_sections) || table > size || (size - table) / 40 < count) return false;
+    for (std::size_t i = 0; i < count; ++i) {
+        const unsigned char* h = head + table + 40 * i;
+        const ClientSection& s = client_sections[i];
+        if (std::memcmp(h, s.name, 8) != 0 || le32(h + 8) != s.size || le32(h + 12) != s.address || le32(h + 16) != s.raw_size ||
+            le32(h + 20) != s.raw_offset) return false;
+    }
+    return true;
+}
+// Reads the module's file once: its SHA-256, its first 4 KB and the hash of each 4 KB block (the
+// first four bytes of the block's SHA-256, as tools\Get-ClientBlocks.ps1 writes them).
+bool read_client(const wchar_t* path, unsigned char (&digest)[32], std::vector<unsigned char>& head, std::vector<std::uint32_t>& blocks) {
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE whole = nullptr;
+    bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0;
+    if (ok) ok = BCryptCreateHash(alg, &whole, nullptr, 0, nullptr, 0, 0) >= 0;
+    unsigned char block[client_block_size];
+    while (ok) {
+        DWORD got = 0; // a block is read whole unless the file ends
+        while (ok && got < sizeof(block)) {
+            DWORD part = 0;
+            if (!ReadFile(file, block + got, static_cast<DWORD>(sizeof(block) - got), &part, nullptr)) ok = false;
+            else if (!part) break;
+            got += part;
+        }
+        if (!ok || !got) break;
+        if (head.empty()) head.assign(block, block + got);
+        ok = BCryptHashData(whole, block, got, 0) >= 0;
+        BCRYPT_HASH_HANDLE one = nullptr;
+        unsigned char part_digest[32];
+        if (ok) ok = BCryptCreateHash(alg, &one, nullptr, 0, nullptr, 0, 0) >= 0 && BCryptHashData(one, block, got, 0) >= 0 &&
+                     BCryptFinishHash(one, part_digest, sizeof(part_digest), 0) >= 0;
+        if (one) BCryptDestroyHash(one);
+        if (ok) blocks.push_back(le32(part_digest));
+    }
+    if (ok) ok = BCryptFinishHash(whole, digest, sizeof(digest), 0) >= 0;
+    if (whole) BCryptDestroyHash(whole);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    CloseHandle(file);
+    return ok;
+}
+void client_log(const char* message) { if (host) host->log(message); }
+bool check_client_file(const wchar_t* path) {
+    unsigned char digest[32] = {};
+    std::vector<unsigned char> head;
+    std::vector<std::uint32_t> blocks;
+    if (!read_client(path, digest, head, blocks)) { client_log("client.dll could not be read: the client fixes stay off."); return false; }
+    if (!std::memcmp(digest, client_sha256, 32) || !std::memcmp(digest, client_up12_sha256, 32)) return true;
+    if (!same_client_layout(head.data(), head.size())) {
+        client_log("client.dll is not the analyzed build: the client fixes stay off.");
+        return false;
+    }
+    const std::size_t total = _countof(client_blocks);
+    std::size_t changed = 0;
+    for (std::size_t i = 0; i < (blocks.size() > total ? blocks.size() : total); ++i)
+        if (i >= total || i >= blocks.size() || blocks[i] != client_blocks[i]) ++changed;
+    char message[200];
+    if (changed > total / 10) {
+        sprintf_s(message, "client.dll has the analyzed build's layout, but %u of its %u blocks of 4 KB differ: "
+                  "too much for a patch that edits it in place, so the client fixes stay off.",
+                  static_cast<unsigned>(changed), static_cast<unsigned>(total));
+        client_log(message);
+        return false;
+    }
+    sprintf_s(message, "client.dll: the analyzed build, edited in place by a patch (%u of %u blocks of 4 KB differ); "
+              "each client fix checks its code before patching.", static_cast<unsigned>(changed), static_cast<unsigned>(total));
+    client_log(message);
+    return true;
+}
+bool check_client(HMODULE module) {
+    wchar_t path[MAX_PATH];
+    const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
+    if (!length || length >= MAX_PATH) { client_log("client.dll could not be found: the client fixes stay off."); return false; }
+    return check_client_file(path);
+}
 HMODULE checked_module = nullptr;
 bool checked_result = false;
 bool supported(HMODULE module) {
     if (!module) return false;
-    if (module != checked_module) { checked_result = hash_matches(module, client_sha256); checked_module = module; }
+    if (module != checked_module) { checked_result = check_client(module); checked_module = module; }
     return checked_result;
 }
 
@@ -287,6 +373,12 @@ bool install_eye_blend() {
         return false;
     }
     const auto base = reinterpret_cast<std::uintptr_t>(module);
+    // 1.0.1: the constant the displaced instruction loads must still be 1.0f (a patch could change
+    // the value without changing the instruction).
+    if (*reinterpret_cast<const std::uint32_t*>(base + 0x1e34ec) != 0x3f800000u) {
+        host->log("Eye target interpolation fix disabled: its constant differs.");
+        return false;
+    }
     // Displaced instruction: fld dword ptr [client + 0x1e34ec] (constant 1); operand relocated for ASLR.
     unsigned char expected[6] = {0xd9, 0x05};
     const auto operand = static_cast<std::uint32_t>(base + 0x1e34ec);
@@ -342,6 +434,13 @@ bool install_particle_cleanup() {
         return false;
     }
     client = reinterpret_cast<std::uintptr_t>(module);
+    // 1.0.1: the cleanup function called from the hook is checked too (push esi; mov esi,ecx;
+    // mov eax,[esi+46Ch]; test eax,eax; je), so an edited one leaves the fix off.
+    const unsigned char cleanup_code[] = {0x56,0x8b,0xf1,0x8b,0x86,0x6c,0x04,0x00,0x00,0x85,0xc0,0x74,0x16};
+    if (std::memcmp(reinterpret_cast<const void*>(client + 0xaeed0), cleanup_code, sizeof(cleanup_code)) != 0) {
+        host->log("Orphan particle fix disabled: cleanup bytes differ.");
+        return false;
+    }
     cleanup = reinterpret_cast<Cleanup>(client + 0xaeed0);
     const unsigned char expected[] = {0x83,0xec,0x44,0x53,0x56};
     void* trampoline = nullptr;
@@ -375,10 +474,14 @@ void install_move_yaw_blend() {
     const auto module = GetModuleHandleW(L"client.dll");
     if (!module || !supported(module)) { host->log("NPC move_yaw blend disabled: unsupported client build."); return; }
     if (!apply_move_yaw_blend()) { host->log("NPC move_yaw blend disabled: CVar unavailable or change not verified."); return; }
-    // Reapply on lifecycle changes only, not every frame.
-    if (!host->subscribe(host->context, BLSE_MSG_LEVEL_INIT, refresh_move_yaw, nullptr) ||
-        !host->subscribe(host->context, BLSE_MSG_GAME_LOADED, refresh_move_yaw, nullptr))
-        host->log("NPC move_yaw blend: lifecycle subscription failed; initial change only.");
+    // Reapply on lifecycle changes only, not every frame. Subscribed once: installing again after
+    // an engine restart must not add a second pair.
+    static bool subscribed = false;
+    if (!subscribed) {
+        subscribed = host->subscribe(host->context, BLSE_MSG_LEVEL_INIT, refresh_move_yaw, nullptr) &&
+                     host->subscribe(host->context, BLSE_MSG_GAME_LOADED, refresh_move_yaw, nullptr);
+        if (!subscribed) host->log("NPC move_yaw blend: lifecycle subscription failed; initial change only.");
+    }
     host->log("NPC move_yaw blend enabled (debug_npc_move_yaw_snap 0).");
 }
 
@@ -392,6 +495,7 @@ void BLSE_CALL reset_npc_state(const char*, const void*, size_t, void*) {
 }
 
 std::uint64_t startup_subscription = 0;
+bool shutdown_subscribed = false;
 void BLSE_CALL start_when_ready(const char*, const void*, size_t, void*) {
     if (!GetModuleHandleW(L"client.dll")) return;
     host->unsubscribe(host->context, startup_subscription);
@@ -406,7 +510,21 @@ void BLSE_CALL start_when_ready(const char*, const void*, size_t, void*) {
     if (enabled("npc_move_yaw_smoothing")) install_move_yaw_smoothing();
     if (enabled("npc_pose_interpolation")) install_pose_interpolation();
     install_eye_glance(); // [EyeGlances] enabled=1/0
-    host->subscribe(host->context, BLSE_MSG_LEVEL_SHUTDOWN, reset_npc_state, nullptr);
+    if (!shutdown_subscribed) shutdown_subscribed = host->subscribe(host->context, BLSE_MSG_LEVEL_SHUTDOWN, reset_npc_state, nullptr) != 0;
+}
+
+// 1.0.1: after an engine restart (the console's _restart, or a settings change that restarts the
+// engine) the game loads client.dll and vampire.dll again, usually at other addresses. The hooks
+// went with the old modules (BLSE forgets them), so everything is checked and installed again once
+// the new client.dll is there. The build check is redone even if Windows reuses the old address.
+void BLSE_CALL rearm_after_restart(const char*, const void*, size_t, void*) {
+    checked_module = nullptr;
+    checked_result = false;
+    pose_interpolation = false;
+    reset_npc_state(nullptr, nullptr, 0, nullptr);
+    if (!startup_subscription) startup_subscription = host->subscribe(host->context, BLSE_MSG_GAME_FRAME, start_when_ready, nullptr);
+    host->log(startup_subscription ? "Engine restarted: the fixes are installed again when client.dll is ready."
+                                   : "Engine restarted: could not wait for client.dll; the fixes stay off until the game restarts.");
 }
 }
 
@@ -423,6 +541,8 @@ extern "C" BLSE_EXPORT int BLSE_CALL BLSE_PluginLoad(const BLSE_HostAPI* api) {
     host = api;
     startup_subscription = host->subscribe(host->context, BLSE_MSG_GAME_FRAME, start_when_ready, nullptr);
     if (!startup_subscription) return 0;
+    if (!host->subscribe(host->context, BLSE_MSG_ENGINE_RESTART, rearm_after_restart, nullptr))
+        host->log("Engine restart not followed: after one, the fixes stay off until the game restarts.");
     host->log("Waiting for client.dll before installing fixes.");
     return 1;
 }

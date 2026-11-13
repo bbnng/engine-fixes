@@ -203,6 +203,15 @@ void install_eye_glance() {
     }
     const auto module = reinterpret_cast<unsigned char*>(GetModuleHandleW(L"vampire.dll"));
     if (!module) return;
+    // 1.0.1: the eye position helper the glance point calls is checked too (sub esp,3Ch; push ebx;
+    // push esi; mov esi,ecx; push edi; test esi,esi; je; mov ecx,[esi+26Ch]; test ecx,ecx), since a
+    // patch may have edited vampire.dll in place.
+    const unsigned char eye_position_code[] = {0x83,0xec,0x3c,0x53,0x56,0x8b,0xf1,0x57,0x85,0xf6,
+                                               0x74,0x11,0x8b,0x8e,0x6c,0x02,0x00,0x00,0x85,0xc9};
+    if (std::memcmp(module + 0x331da0, eye_position_code, sizeof(eye_position_code)) != 0) {
+        host->log("NPC eye glances disabled: eye position helper bytes differ.");
+        return;
+    }
     load_glance_settings();
     glance_server = reinterpret_cast<std::uintptr_t>(module);
     game_eye_position = reinterpret_cast<EyePositionFn>(module + 0x331da0);

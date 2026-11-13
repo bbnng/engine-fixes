@@ -1,4 +1,4 @@
-Engine Fixes 1.0.0
+Engine Fixes 1.0.1
 for Vampire: The Masquerade - Bloodlines
 ==========================================
 
@@ -11,9 +11,13 @@ REQUIREMENTS
 ------------
 - Vampire: The Masquerade - Bloodlines with the Unofficial Patch (Basic or Plus).
 - BLSE (Bloodlines Script Extender) 0.6.1 or newer.
+- With Unofficial Patch 12.0 or newer: BLSE 0.6.3 or newer. With an older BLSE, the
+  fixes for NPCs and eyes that live in vampire.dll stay off on these patch versions.
 
-Every fix checks the exact game files before it touches anything. On a game build it
-does not recognize, or if another mod already changed the same code, that fix stays off
+Every fix checks the game files and the exact code it changes before it touches anything.
+Newer Unofficial Patch releases that edit the game's DLLs in place (12.0 does) should keep
+working without an Engine Fixes update. On a game build it does not recognize, where a patch
+changed the code a fix needs, or if another mod already changed the same code, that fix stays off
 and Bin\loader\blse\blse.log says why. The rest of the game is not affected.
 
 

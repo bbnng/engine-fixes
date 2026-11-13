@@ -1,6 +1,7 @@
 #include "../src/engine_fixes.cpp"
 #include <cassert>
 #include <vector>
+#include <string>
 #include <cstdio>
 #include <limits>
 extern "C" void __cdecl _CIacos();
@@ -712,7 +713,123 @@ void test_settings_sections() {
     host = old_host;
     std::puts("Settings: themed sections, old [Fixes] fallback, defaults for trimmed keys, no write-back; glances=0 stops random glances.");
 }
+// client.dll check (1.0.1): the analyzed file, the same build edited in place by a patch, and files
+// that differ too much or have another link time. Runs where the analyzed client.dll is at hand.
+void test_client_layout() {
+    // Headers alone, without the game's client.dll: the analyzed layout and what breaks it.
+    std::vector<unsigned char> head(0x400);
+    head[0] = 'M'; head[1] = 'Z'; head[0x3c] = 0x80;
+    std::memcpy(head.data() + 0x80, "PE\0\0", 4);
+    head[0x84] = 0x4c; head[0x85] = 0x01;
+    head[0x86] = static_cast<unsigned char>(_countof(client_sections));
+    std::memcpy(head.data() + 0x88, &client_timestamp, 4);
+    head[0x94] = 0xe0;
+    const std::size_t table = 0x98 + 0xe0;
+    for (std::size_t i = 0; i < _countof(client_sections); ++i) {
+        unsigned char* h = head.data() + table + 40 * i;
+        const ClientSection& c = client_sections[i];
+        std::memcpy(h, c.name, 8);
+        std::memcpy(h + 8, &c.size, 4); std::memcpy(h + 12, &c.address, 4); std::memcpy(h + 16, &c.raw_size, 4); std::memcpy(h + 20, &c.raw_offset, 4);
+    }
+    assert(same_client_layout(head.data(), head.size()));
+    assert(same_client_layout(head.data(), table + 40 * _countof(client_sections)));      // exactly the section table
+    assert(!same_client_layout(head.data(), table + 40 * _countof(client_sections) - 1)); // the last section cut off
+    assert(!same_client_layout(head.data(), 0x3f) && !same_client_layout(head.data(), 0x90));
+    struct Change { std::size_t at; unsigned char value; };
+    const Change changes[] = {{0, 'X'}, {0x80, 'X'}, {0x84, 0x64}, {0x86, 5}, {0x86, 3}, {0x88, 0x64}, {0x95, 0x10},
+                              {table + 1, 'X'}, {table + 8, 0}, {table + 40 + 13, 0}, {table + 80 + 17, 0}, {table + 120 + 21, 0}};
+    for (const auto& c : changes) {
+        std::vector<unsigned char> copy = head;
+        copy[c.at] = c.value;
+        assert(!same_client_layout(copy.data(), copy.size()));
+    }
+    std::vector<unsigned char> distant = head;
+    distant[0x3c] = distant[0x3d] = distant[0x3e] = distant[0x3f] = 0xff;                                 // e_lfanew far past the data
+    assert(!same_client_layout(distant.data(), distant.size()));
+    assert(!check_client_file(L"C:\\this-file-should-not-exist-engine-fixes.dll"));
+    std::puts("client.dll layout: analyzed headers, broken and cut-off headers and a missing file passed.");
+}
+
+void test_client_check() {
+    const wchar_t* analyzed = L"Game Files\\Vampire\\cl_dlls\\client.dll";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, analyzed, L"rb") || !f) { std::puts("client.dll check: the analyzed client.dll is not in Game Files, skipped."); return; }
+    std::vector<unsigned char> data;
+    unsigned char buffer[65536];
+    for (std::size_t got; (got = std::fread(buffer, 1, sizeof(buffer), f)) > 0;) data.insert(data.end(), buffer, buffer + got);
+    std::fclose(f);
+    assert(check_client_file(analyzed));
+    wchar_t dir[MAX_PATH];
+    const DWORD n = GetTempPathW(MAX_PATH, dir);
+    const std::wstring copy = std::wstring(dir, n) + L"engine-fixes-client-test.dll";
+    auto check_copy = [&](const std::vector<unsigned char>& bytes) {
+        FILE* out = nullptr;
+        assert(!_wfopen_s(&out, copy.c_str(), L"wb") && out);
+        assert(std::fwrite(bytes.data(), 1, bytes.size(), out) == bytes.size());
+        std::fclose(out);
+        const bool ok = check_client_file(copy.c_str());
+        DeleteFileW(copy.c_str());
+        return ok;
+    };
+    std::vector<unsigned char> edited = data;
+    edited[0x18539c] ^= 0xff;                                   // where Unofficial Patch 12.0 changed code
+    edited[0x2d64c4] ^= 0xff;                                   // and a name in .data
+    assert(check_copy(edited));
+    // 838 blocks: up to 83 (838 / 10, rounded down) may differ.
+    std::vector<unsigned char> limit = data;
+    for (std::size_t i = 0; i < 83; ++i) limit[0x1000 + i * 4096] ^= 0xff; // 83: the most allowed
+    assert(check_copy(limit));
+    std::vector<unsigned char> heavy = limit;
+    heavy[0x1000 + 83 * 4096] ^= 0xff;                                    // 84: one too many
+    assert(!check_copy(heavy));
+    std::vector<unsigned char> longer = edited;
+    longer.insert(longer.end(), 4096, 0);                                   // a block appended: it counts as changed
+    assert(check_copy(longer));
+    std::vector<unsigned char> shorter = edited;
+    shorter.resize(shorter.size() - 300);                                   // the last block shortened
+    assert(check_copy(shorter));
+    std::vector<unsigned char> relinked = edited;
+    const std::uint32_t pe = le32(relinked.data() + 0x3c);
+    relinked[pe + 8] ^= 1;                                      // another link time
+    assert(!check_copy(relinked));
+    std::vector<unsigned char> grown = edited;
+    const std::size_t table = pe + 24 + (grown[pe + 20] | grown[pe + 21] << 8);
+    grown[table + 8] += 0x10;                                   // .text VirtualSize grown
+    assert(!check_copy(grown));
+    std::puts("client.dll check: analyzed file, in-place edit, 83 and 84 changed blocks, longer and shorter files, another link time, changed sections passed.");
+}
+
+// 1.0.1: an engine restart drops the cached build check and waits for client.dll again, once.
+int restart_subscribes = 0;
+std::uint64_t BLSE_CALL mock_subscribe(void*, const char* topic, BLSE_MessageFn, void*) {
+    ++restart_subscribes;
+    return std::strcmp(topic, BLSE_MSG_GAME_FRAME) == 0 ? 77 : 0;
+}
+void BLSE_CALL mock_log(const char*) {}
+void test_restart() {
+    BLSE_HostAPI mock = {};
+    mock.subscribe = mock_subscribe;
+    mock.log = mock_log;
+    const auto old_host = host; host = &mock;
+    const auto old_startup = startup_subscription;
+    int npc = 0;
+    walk_phases[1].entity = &npc;
+    checked_module = GetModuleHandleW(nullptr); checked_result = true; pose_interpolation = true;
+    startup_subscription = 0;                        // installed before: waiting again
+    rearm_after_restart(nullptr, nullptr, 0, nullptr);
+    assert(!checked_module && !checked_result && !pose_interpolation && !walk_phases[1].entity);
+    assert(startup_subscription == 77 && restart_subscribes == 1);
+    rearm_after_restart(nullptr, nullptr, 0, nullptr); // still waiting: no second subscription
+    assert(startup_subscription == 77 && restart_subscribes == 1);
+    startup_subscription = old_startup;
+    host = old_host;
+    std::puts("Engine restart: build check dropped, per-NPC state cleared, one wait for client.dll passed.");
+}
+
 int main() {
+    test_client_layout();
+    test_client_check();
+    test_restart();
     test_release_state();
     test_plugin_load();
     test_steering();

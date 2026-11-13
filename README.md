@@ -24,12 +24,12 @@ A [BLSE](https://gitlab.com/bigbannng/bloodlines-script-extender) plugin for *Va
 | `npc_move_yaw_smoothing` | Limits how fast the legs' walking-direction blend can change |
 | `[EyeGlances]` | Calmer dialogue glances. The game's slow sweeps read as eye rolls; glances are now gentler, rarer and mostly sideways. All of it is adjustable, or glances can be switched off |
 
-Every fix checks the exact game files before changing anything. On an unknown game build, or if another mod already patched the same code, that fix stays off and `blse.log` says why.
+Every fix checks the game files and the exact code it changes before changing anything. Newer Unofficial Patch releases that edit the game's DLLs in place (12.0 does) should keep working without an update: client.dll is accepted when it is the same build with a small edit, and the fixes in vampire.dll follow BLSE's build recognition. On an unknown game build, where a patch changed the code a fix needs, or if another mod already patched the same code, that fix stays off and `blse.log` says why. After an engine restart the fixes are checked and installed again.
 
 ## Requirements
 
 - *Bloodlines* with the Unofficial Patch (Basic or Plus)
-- BLSE 0.6.1 or newer
+- BLSE 0.6.1 or newer; with Unofficial Patch 12.0 or newer, BLSE 0.6.3 or newer (older versions leave the vampire.dll fixes off there)
 
 ## Installing
 
