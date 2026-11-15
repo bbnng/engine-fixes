@@ -1,4 +1,6 @@
-﻿// Engine Fixes for Vampire: The Masquerade - Bloodlines (BLSE plugin).
+// Engine Fixes and Tweaks for Vampire: The Masquerade - Bloodlines.
+// Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms: see LICENSE and NOTICE.
+// BLSE plugin.
 // Code-level bug fixes plus optional smoothing tweaks. Every hook is gated by the game build (BLSE's
 // build profile for vampire.dll; for client.dll its hash, or since 1.0.1 the same build edited in
 // place by a newer Unofficial Patch) and by whole-instruction byte checks, so an unknown or already
@@ -12,18 +14,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include "model_name_cache.h"
 #pragma comment(lib, "bcrypt.lib")
 
-BLSE_PLUGIN_INFO("engine_fixes", "1.0.1", "Engine Fixes", "Engine and game-code bug fixes for Bloodlines", "0.6", nullptr);
+BLSE_PLUGIN_INFO("engine_fixes", "1.2", "Engine Fixes and Tweaks", "Engine and game-code bug fixes for Bloodlines, faster startup and loading, plus optional tweaks", "0.6", nullptr);
 
 namespace {
 const BLSE_HostAPI* host;
 const char* const server_profile = "vtmb-x86-80d73e74-9d00b2c1-c546f4de-2ce854dd";
 
 // --- settings ---
-// Settings live in themed INI sections. A key is looked up in every section (names are unique)
-// and in a legacy [Fixes] section, and is never written back: a missing key uses its default.
-const char* const setting_sections[] = {"Effects", "Eyes", "NPCAnimation", "EyeGlances", "Fixes"};
+// Settings live in themed INI sections. A key is looked up in every section (names are unique),
+// then in the old [Fixes] section of pre-1.0 INIs, and is never written back: a missing key uses
+// its default, so the INI only holds what the user sees and changes.
+const char* const setting_sections[] = {"Fixes", "Tweaks", "EyeGlances", "Startup", "Effects", "Eyes", "NPCAnimation"};
 bool read_setting(const char* key, char* out, size_t capacity) {
     for (const char* section : setting_sections) {
         size_t size = 0;
@@ -168,6 +172,8 @@ bool supported(HMODULE module) {
     return checked_result;
 }
 
+#include "restart_startup.inl"
+
 std::uintptr_t server_base;
 std::uintptr_t client;
 
@@ -237,8 +243,8 @@ int transition_at(void* self, int activity, int sequence, int translated, int we
     if (words[1019] == activity && words[444] == sequence) {
         if (returning) {
             // Same simulation time proves the temporary idle has not occupied a later simulated
-            // frame. Internal animation maintenance can advance its cycle slightly within this
-            // call chain, so a non-zero cycle is accepted.
+            // frame. Internal animation maintenance can advance its cycle within this call chain
+            // (captured: 0.0054); requiring zero would lose the phase.
             values[446] = previous.cycle;
             values[406] = previous.event_check; // avoid replaying already passed animation events
             bytes[1628] = previous.finished;
@@ -494,6 +500,15 @@ void BLSE_CALL reset_npc_state(const char*, const void*, size_t, void*) {
     for (auto& s : pose_blends) s = {};
 }
 
+#include "loading_probe.inl"
+#include "loading_signon.inl"
+#include "loading_restore.inl"
+#include "loading_entities.inl"
+#include "loading_sound_tables.inl"
+#include "loading_model_names.inl"
+#include "loading_loose_stat.inl"
+#include "loading_sound_precache.inl"
+#include "knox_eyes.inl"
 std::uint64_t startup_subscription = 0;
 bool shutdown_subscribed = false;
 void BLSE_CALL start_when_ready(const char*, const void*, size_t, void*) {
@@ -510,6 +525,7 @@ void BLSE_CALL start_when_ready(const char*, const void*, size_t, void*) {
     if (enabled("npc_move_yaw_smoothing")) install_move_yaw_smoothing();
     if (enabled("npc_pose_interpolation")) install_pose_interpolation();
     install_eye_glance(); // [EyeGlances] enabled=1/0
+    knox_eyes::install(); // [Tweaks] knox_relaxed_eyes
     if (!shutdown_subscribed) shutdown_subscribed = host->subscribe(host->context, BLSE_MSG_LEVEL_SHUTDOWN, reset_npc_state, nullptr) != 0;
 }
 
@@ -539,10 +555,19 @@ extern "C" BLSE_EXPORT int BLSE_CALL BLSE_PluginLoad(const BLSE_HostAPI* api) {
         return 0;
     }
     host = api;
+    restart_startup::install();
     startup_subscription = host->subscribe(host->context, BLSE_MSG_GAME_FRAME, start_when_ready, nullptr);
     if (!startup_subscription) return 0;
     if (!host->subscribe(host->context, BLSE_MSG_ENGINE_RESTART, rearm_after_restart, nullptr))
         host->log("Engine restart not followed: after one, the fixes stay off until the game restarts.");
+    loading::install(); // [Loading] loading_trace=1
+    loading::signon::install(); // [Loading] signon_fps_max / loading_trace
+    loading::restore::install(); // [Loading] restore_trace (needs loading_trace=1)
+    loading::entities::install(); // [Loading] entity_trace / entity_sampler (needs restore_trace=1)
+    loading::sound_tables::install(); // [Loading] server_sound_tables (default off)
+    loading::model_names::install(); // [Loading] model_name_cache (default off)
+    loading::loose_stat::install(); // [Loading] loose_stat_fast (default off)
+    loading::sound_precache::install(); // [Loading] sound_precache_index (default off)
     host->log("Waiting for client.dll before installing fixes.");
     return 1;
 }

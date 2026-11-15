@@ -1,11 +1,12 @@
-// Client-side NPC pose parameter interpolation.
+// Client-side NPC pose parameter interpolation (0.8.3).
 //
 // The server sends NPC pose parameters (for walkers: move_yaw, the legs' movement direction)
 // once per AI think, about every 100 ms. This client build does not interpolate them: the
 // value is used as-is until the next update, so the leg blend changes in visible 10 Hz steps
-// while the body's position and facing move smoothly every frame.
+// (captured walking-0.8.2-2026-11-12-1641.log: pose 0 holds for ~0.1 s, then jumps up to 36
+// degrees) while the body's position and facing move smoothly every frame.
 //
-// Inside the client pose-build hook (client+0x979b0), each changed networked value
+// Inside the existing client pose-build hook (client+0x979b0), each changed networked value
 // is blended linearly from what was shown to the new value over `npc_pose_interpolation_ms`,
 // written only for that build, and restored afterwards, so networking and the server are
 // untouched. A jump of more than half the range (the move_yaw +-180 wrap) snaps, as before.
@@ -21,7 +22,8 @@ struct PoseBlend {
     float net[pose_count] = {}, from[pose_count] = {};
     double start[pose_count] = {};
 };
-// One slot per entity index (the engine allows 2048 entities).
+// One slot per entity index (the engine allows 2048 entities): shared slots made two NPCs
+// 512 indices apart reset each other every frame, so neither was blended.
 PoseBlend pose_blends[2048];
 bool pose_interpolation = false;
 float pose_interpolation_ms = 100.0f;

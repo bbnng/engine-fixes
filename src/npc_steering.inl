@@ -1,20 +1,21 @@
-// NPC local-avoidance damping and move_yaw smoothing.
+// NPC local-avoidance damping and move_yaw smoothing (0.8.1).
 //
-// vampire.dll (server profile vtmb-x86-...-c546f4de-...):
+// IDA (vampire.dll, server profile vtmb-x86-...-c546f4de-...):
 //   0x1030a0d0 CAI_PlaneSolver::RunMoveSolver(goal, trace, probe, oscillation, out) thiscall, retn 14h.
 //              Re-solves the walking direction from scratch every time it runs. Only 10-20 %
 //              of the old direction/velocity is blended in, so in crowds the result can swing
-//              100-200 degrees between AI thinks.
+//              100-200 degrees between AI thinks (captured: walking-0.8.0-2026-11-12-1558.log).
 //   0x102e19e0 CAI_Motor::MoveFacing(goal) thiscall, retn 4. Receives the final ground move
 //              direction (goal+12) and stores move_yaw = move dir - body yaw at NPC+0x63ec.
 //   0x102bf310 NPC: SetPoseParameter("move_yaw", NPC+0x63ec), once per NPC think.
 // Goal layout (AILocalMoveGoal_t): target +0, dir +12, navType +48. Solver: NPC at +4,
 // obstacle suggestion count at +92. gpGlobals->curtime = *(server+0x70b228) + 12.
-// goal.facing is at +24. CAI_Motor: NPC +4, face-backwards flag (byte) +40,
+// 0.8.2 (IDA): goal.facing is at +24. CAI_Motor: NPC +4, face-backwards flag (byte) +40,
 // ideal yaw +52, yaw speed +56. UpdateYaw (0x102e1e20) turns the body (NPC vtable +884,
 // GetLocalAngles, y at +4) at (int)yaw_speed * 10 degrees per second; motor +44 is the time of
 // the last yaw update.
-// goal.facing is not the walking direction while avoiding, so "faces_move" only means: no facing target pulls the
+// 0.8.4: goal.facing is not the walking direction while avoiding (captured 16:51: faces_move was 0
+// for almost every avoidance think), so "faces_move" now only means: no facing target pulls the
 // ideal yaw away from goal.facing, and the NPC is not set to walk backwards. The leg clamp is also
 // applied in MoveFacing, before the game turns the body and walks, so direction changes that do
 // not come from the avoidance solver (new detour waypoints, path corners) are covered too.
@@ -22,19 +23,19 @@
 struct SteeringState {
     const void* npc = nullptr;
     float time = 0, yaw = 0, target[3] = {};
-    // Body yaw after the last MoveFacing, the body's turn rate (deg/s, 0 = unknown) and
+    // 0.8.2: body yaw after the last MoveFacing, the body's turn rate (deg/s, 0 = unknown) and
     // whether the NPC turns its body toward its walking direction (no facing target, not backwards).
     float body = 0, turn_rate = 0;
     bool faces_move = false;
-    // Where the NPC stood when this record was made, and whether the MoveFacing clamp
+    // 0.8.5: where the NPC stood when this record was made, and whether the MoveFacing clamp
     // changed the step that followed (to notice a clamped step that did not move).
     float origin[3] = {};
     bool has_origin = false, clamped = false;
 };
-// A MoveFacing clamp in a think where the avoidance solver already chose a checked direction can
-// push the step into the obstacle, so the NPC stands still for one think. The MoveFacing clamp
-// skips any think in which the solver ran for that NPC, and a clamped step that does not move
-// suspends it for that NPC for 2 s.
+// 0.8.5 (captured 16:58:04, walking-0.8.4-...-1657.log): a MoveFacing clamp in a think where the
+// avoidance solver had already chosen a checked direction pushed the step into the obstacle and
+// the NPC stood still for one think. The MoveFacing clamp now skips any think in which the solver
+// ran for that NPC, and a clamped step that does not move suspends it for that NPC for 2 s.
 struct ClampGuard {
     const void* npc = nullptr;
     float solver_time = -1, suspended_until = -1;
@@ -48,10 +49,10 @@ ClampGuard clamp_guards[256];
 MoveYawState move_yaw_states[256];
 float steering_turn_rate = 360.0f, move_yaw_rate = 360.0f, steering_max_leg_angle = 30.0f, steering_follow = 0.4f;
 unsigned steering_damped_count = 0, move_yaw_smoothed_count = 0, leg_clamp_count = 0, leg_clamp_skipped = 0, leg_clamp_suspended = 0;
-// A damped direction can fail the obstacle
+// 0.8.6 (captured 17:07:03, walking-0.8.5-...-1705.log): a damped direction can fail the obstacle
 // check in CAI_PlaneSolver::Solve (0x1030aea0, thiscall(goal, probe, out), retn 0Ch). Solve then
 // fails, and the NPC either stands still for a think or the navigator snaps to another route.
-// Solve is hooked: if it fails after the damping changed the direction, it runs again with the
+// Solve is now hooked: if it fails after the damping changed the direction, it runs again with the
 // game's own solver result, so damping never costs a step.
 unsigned solve_retries = 0, solve_retry_saved = 0;
 thread_local bool steering_bypass = false, steering_changed = false;
@@ -91,12 +92,12 @@ MoveYawState& move_yaw_slot(const void* npc) {
 // direction it actually moved last, while it keeps walking to the same target. Stale or
 // missing history (> 0.3 s) or invalid input leave the solver's choice alone,
 // so a blocked NPC always regains the full solver result within a few thinks.
-// The turn rate never exceeds the NPC's own body turn rate, and while the NPC walks
+// 0.8.2: the turn rate never exceeds the NPC's own body turn rate, and while the NPC walks
 // roughly forward (legs within 2 x max_leg of the body) the direction stays within max_leg of
 // where the body will face after this think, so the legs show a curve, not a sidestep.
-// `follow` (0..1) is the share of the remaining angle toward the solver's choice taken per 0.1 s
-// toward the same target, so a solver flip-flopping between two gaps averages out instead of
-// swinging the body back and forth. 1 = off.
+// 0.8.5: `follow` (0..1) is the share of the remaining angle toward the solver's choice taken per
+// 0.1 s toward the same target, so a solver flip-flopping between two gaps averages out instead of
+// swinging the body back and forth (captured 16:57:53-55: -48, -3, -54, -105, -51, -105). 1 = off.
 bool damped_steering_yaw(const SteeringState& last, const void* npc, const float target[3],
                          float now, float rate, float solved, float& result, float max_leg = 0.0f,
                          float follow = 1.0f) {
@@ -313,7 +314,7 @@ int __fastcall smooth_apply_move_yaw(void* npc, void*, int argument) {
     __try { now = server_time(); } __except (EXCEPTION_EXECUTE_HANDLER) { return original_apply_move_yaw(npc, argument); }
     const float applied = smoothed_move_yaw(move_yaw_slot(npc), npc, now, move_yaw_rate, raw, changed);
     if (!changed) return original_apply_move_yaw(npc, argument);
-    // The field is only read here; MoveFacing writes a fresh raw value each move.
+    // The field is only read here (IDA xrefs); MoveFacing writes a fresh raw value each move.
     *field = applied;
     const int result = original_apply_move_yaw(npc, argument);
     *field = raw;

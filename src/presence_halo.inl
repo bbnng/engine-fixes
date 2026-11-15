@@ -10,7 +10,7 @@ const unsigned* presence_resolve(const unsigned* list,unsigned handle) {
 bool presence_dead_vampire(const unsigned* self) {
     if (!presence_server) return false;
     __try {
-        // Exact C_EnvParticle class; +228 is its own network EHANDLE (client
+        // Exact C_EnvParticle class; +228 is its own network EHANDLE (IDA
         // 0x1009f060), distinct from its followed entity's handle at +392.
         if (!self || self[0]!=client+0x22ed24 || self[264]!=2) return false;
         const auto list=*reinterpret_cast<const unsigned* const*>(presence_server+0x566458);
