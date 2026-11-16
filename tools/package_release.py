@@ -44,11 +44,12 @@ shutil.rmtree(stage, ignore_errors=True)
 mod = os.path.join(stage, 'Bin', 'loader', 'blse', 'mods', 'engine_fixes')
 os.makedirs(os.path.join(mod, 'blse', 'plugins'))
 shutil.copy2(os.path.join('build', 'engine_fixes.dll'), os.path.join(mod, 'blse', 'plugins', 'engine_fixes.dll'))
-for name in ('mod.ini', 'engine_fixes.ini', 'README.txt'):
+for name in ('mod.ini', 'engine_fixes.ini'):
     crlf(os.path.join('package', name), os.path.join(mod, name))
-crlf('LICENSE', os.path.join(mod, 'LICENSE.txt'))
-crlf('NOTICE', os.path.join(mod, 'NOTICE.txt'))
-crlf(os.path.join('include', 'BLSE-LICENSE.txt'), os.path.join(mod, 'BLSE-LICENSE.txt'))
+# README and licences sit at the top of the archive, next to the Bin folder.
+crlf('LICENSE', os.path.join(stage, 'LICENSE.txt'))
+crlf('NOTICE', os.path.join(stage, 'NOTICE.txt'))
+crlf(os.path.join('include', 'BLSE-LICENSE.txt'), os.path.join(stage, 'BLSE-LICENSE.txt'))
 loader = os.path.join(stage, 'Bin', 'loader')
 shutil.copy2(os.path.join('build', 'engine_fixes_intro.vtm'), os.path.join(loader, 'engine_fixes_intro.vtm'))
 crlf(os.path.join('package', 'engine_fixes_intro.ini'), os.path.join(loader, 'engine_fixes_intro.ini'))

@@ -4,7 +4,7 @@
 // research probe to the current plugin (2026-11-14). Read-only timing: no loading, save,
 // Python, wait or gameplay behavior is changed. Included inside engine_fixes.cpp's unnamed
 // namespace AFTER restart_startup.inl (uses host, supported(), server_profile and
-// restart_startup::exact_module). Timed hooks do no heap allocation and no logging; the
+// build_check.h). Timed hooks do no heap allocation and no logging; the
 // main-thread task writes bounded summaries outside timed scopes.
 //
 // The UP12 Vampire.exe loader replaced the old loading-pause.vtm: its "Loading Wait For Enter"
@@ -14,7 +14,7 @@
 // +0x7cd0) and calls engine+0x86fe0 plus Vampire.exe's own Sleep(16). The loader byte-checks
 // engine 0x25420/0x25430/0x86fe0/0x1b800 when client.dll loads, so none of those, nor the
 // call site, is hooked here. Instead a passive sampler thread reads the two engine signon
-// words and that loader byte (exact Vampire.exe hash plus the three instructions verified).
+// words and that loader byte (the three loader instructions that use it verified).
 namespace loading {
 using Tick=std::uint64_t;
 enum MetricId { transition, map_load, extract, spawn, server_init, server_save, shutdown,
@@ -409,8 +409,7 @@ bool native_active() {
     __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-// --- loader wait identification (installed UP12 Vampire.exe, read-only) ---
-const char* const exe_up12="e195b0a6f676b9400a47eee2df020da0b0beba8293ecdc3ebb6f6dcbf44f2ad7";
+// --- loader wait identification (UP12 Vampire.exe, read-only; found by its code, not its hash) ---
 void absolute(unsigned char* out,std::uintptr_t value) { std::memcpy(out,&value,4); }
 bool same_bytes(std::uintptr_t at,const unsigned char* bytes,size_t size) {
     __try { return !std::memcmp(reinterpret_cast<const void*>(at),bytes,size); }
@@ -517,7 +516,7 @@ PresentChoice present_choice(std::uintptr_t slot_value,std::uintptr_t native,boo
     if (companion_loaded) return present_companion; // the intro companion owns this slot's lifetime
     return slot_value==native?present_hook:present_foreign;
 }
-bool exact(HMODULE module,const char* hex) { return restart_startup::exact_module(module,hex); }
+bool known(HMODULE module,const build_check::Profile& profile) { return build_check::known(module,profile,client_log); }
 HMODULE owner_of(const void* address) {
     HMODULE owner=nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,static_cast<LPCWSTR>(address),&owner);
@@ -546,7 +545,7 @@ bool blse_owns(std::uintptr_t server) {
 void attach_modules() {
     if (!late_fs) if (auto fs=GetModuleHandleW(L"filesystem_stdio.dll")) {
         late_fs=true;
-        if (exact(fs,"ff69aa1ada4bcef2c5fb2277502718fb45ea0d7429f9240b9472eb62753a6194")) {
+        if (known(fs,build_check::filesystem_profile)) {
             const auto base=reinterpret_cast<std::uintptr_t>(fs),vtable=base+0x1d1e8; fs_base=base;
             // BLSE's mod folders install (at startup, or later when a mod first provides a file)
             // requires slot 0 to be native Open and checks the code of slots 1/2. Wrap those
@@ -559,11 +558,11 @@ void attach_modules() {
             if (pointer_hook(vtable+12,base+0x36b0,reinterpret_cast<void*>(probe_write),reinterpret_cast<void**>(&orig_write),"fs_write")) coverage|=1u<<fs_write;
             const unsigned char code[]={0x8b,0x44,0x24,0x08,0x83,0xec,0x08};
             if (code_hook(base,0x1750,code,sizeof code,reinterpret_cast<void*>(probe_disk),reinterpret_cast<void**>(&orig_disk),"disk_open")) coverage|=1u<<disk_open;
-        } else host->log("Loading probe filesystem hooks disabled: hash differs.");
+        } else host->log("Loading probe filesystem hooks disabled: unknown FileSystem_Stdio.dll build.");
     }
     if (!late_mat) if (auto mat=GetModuleHandleW(L"MaterialSystem.dll")) {
         late_mat=true;
-        if (exact(mat,"e7e694c75843c1cc2af360b3606ef55cd0558ae445c9fc087e56fdf3816cdc9b")) {
+        if (known(mat,build_check::material_profile)) {
             const auto base=reinterpret_cast<std::uintptr_t>(mat); std::uintptr_t value=0;
             __try { value=*reinterpret_cast<const std::uintptr_t*>(base+0x498b0); } __except(EXCEPTION_EXECUTE_HANDLER) {}
             switch (present_choice(value,base+0xea10,GetModuleHandleW(L"engine_fixes_intro.vtm")!=nullptr)) {
@@ -575,7 +574,7 @@ void attach_modules() {
                 material_base=base;
                 if (pointer_hook(base+0x498b0,base+0xea10,reinterpret_cast<void*>(probe_present),reinterpret_cast<void**>(&orig_present),"swap_buffers")) coverage|=1u<<present;
             }
-        } else host->log("Loading probe presentation hook disabled: hash differs.");
+        } else host->log("Loading probe presentation hook disabled: unknown MaterialSystem.dll build.");
     }
     if (!late_server) if (auto server=GetModuleHandleW(L"vampire.dll")) {
         // Wait for BLSE's vtable wrappers before hooking native bodies: its initial Save
@@ -735,7 +734,7 @@ void identify_loader() {
     legacy_pause=GetModuleHandleW(L"loading-pause.vtm")!=nullptr;
     if (legacy_pause) { host->log("Loading probe: legacy loading-pause.vtm present; its wait is not separated (first_sim may include it)."); return; }
     auto exe=GetModuleHandleW(nullptr);
-    if (!exact(exe,exe_up12) || !loader_layout(reinterpret_cast<std::uintptr_t>(exe))) {
+    if (!loader_layout(reinterpret_cast<std::uintptr_t>(exe))) {
         host->log("Loading probe: Vampire.exe is not the verified UP12 loader; any loader wait is not separated."); return;
     }
     exe_base=reinterpret_cast<std::uintptr_t>(exe);
@@ -750,7 +749,7 @@ void install() {
         host->log("Loading probe disabled: unsupported profile/API."); return;
     }
     auto module=GetModuleHandleW(L"engine.dll");
-    if (!exact(module,"9d00b2c1e5edbad052fb0b514634ba54574666e12d1b408c46ce141d51ed2313")) {
+    if (!known(module,build_check::engine_profile)) {
         host->log("Loading probe disabled: unsupported engine."); return;
     }
     LARGE_INTEGER f; if (!QueryPerformanceFrequency(&f) || f.QuadPart<=0) { host->log("Loading probe disabled: no performance counter."); return; }

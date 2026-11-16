@@ -5,10 +5,12 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 call :ensure_x86_cl || exit /b 1
 if not exist build mkdir build
-cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Iinclude /LD src\engine_fixes.cpp /Fobuild\engine_fixes.obj /Febuild\engine_fixes.dll /link /INCREMENTAL:NO /IMPLIB:build\engine_fixes.lib || exit /b 1
+rc /nologo /fo build\engine_fixes.res src\engine_fixes.rc || exit /b 1
+cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Iinclude /LD src\engine_fixes.cpp build\engine_fixes.res /Fobuild\engine_fixes.obj /Febuild\engine_fixes.dll /link /INCREMENTAL:NO /IMPLIB:build\engine_fixes.lib || exit /b 1
 cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Iinclude /c src\engine_fixes_intro.cpp /Fobuild\engine_fixes_intro.obj || exit /b 1
 cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Iinclude /c src\intro_worker.cpp /Fobuild\intro_worker.obj || exit /b 1
-link /nologo /DLL /INCREMENTAL:NO /OUT:build\engine_fixes_intro.vtm /IMPLIB:build\engine_fixes_intro.lib build\engine_fixes_intro.obj build\intro_worker.obj bcrypt.lib user32.lib gdi32.lib shell32.lib winmm.lib || exit /b 1
+rc /nologo /fo build\engine_fixes_intro.res src\engine_fixes_intro.rc || exit /b 1
+link /nologo /DLL /INCREMENTAL:NO /OUT:build\engine_fixes_intro.vtm /IMPLIB:build\engine_fixes_intro.lib build\engine_fixes_intro.obj build\intro_worker.obj build\engine_fixes_intro.res bcrypt.lib user32.lib gdi32.lib shell32.lib winmm.lib || exit /b 1
 exit /b 0
 
 :ensure_x86_cl

@@ -1,0 +1,32 @@
+// Version information for engine_fixes_intro.vtm.
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,2,1,0
+ PRODUCTVERSION 1,2,1,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "bigbannng"
+            VALUE "FileDescription", "Engine Fixes and Tweaks - startup companion for Vampire: The Masquerade - Bloodlines"
+            VALUE "FileVersion", "1.2.1.0"
+            VALUE "InternalName", "engine_fixes_intro"
+            VALUE "LegalCopyright", "Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms."
+            VALUE "OriginalFilename", "engine_fixes_intro.vtm"
+            VALUE "ProductName", "Engine Fixes and Tweaks"
+            VALUE "ProductVersion", "1.2.1"
+            VALUE "Comments", "Open source: https://gitlab.com/bigbannng/engine-fixes"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

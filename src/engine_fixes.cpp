@@ -15,9 +15,10 @@
 #include <cstdlib>
 #include <vector>
 #include "model_name_cache.h"
+#include "build_check.h"
 #pragma comment(lib, "bcrypt.lib")
 
-BLSE_PLUGIN_INFO("engine_fixes", "1.2", "Engine Fixes and Tweaks", "Engine and game-code bug fixes for Bloodlines, faster startup and loading, plus optional tweaks", "0.6", nullptr);
+BLSE_PLUGIN_INFO("engine_fixes", "1.2.1", "Engine Fixes and Tweaks", "Engine and game-code bug fixes for Bloodlines, faster startup and loading, plus optional tweaks", "0.6", nullptr);
 
 namespace {
 const BLSE_HostAPI* host;
@@ -503,7 +504,9 @@ void BLSE_CALL reset_npc_state(const char*, const void*, size_t, void*) {
 #include "loading_probe.inl"
 #include "loading_signon.inl"
 #include "loading_restore.inl"
-#include "loading_entities.inl"
+#ifdef ENGINE_FIXES_DIAGNOSTICS
+#include "loading_entities.inl" // development diagnostic, not in release builds
+#endif
 #include "loading_sound_tables.inl"
 #include "loading_model_names.inl"
 #include "loading_loose_stat.inl"
@@ -563,7 +566,9 @@ extern "C" BLSE_EXPORT int BLSE_CALL BLSE_PluginLoad(const BLSE_HostAPI* api) {
     loading::install(); // [Loading] loading_trace=1
     loading::signon::install(); // [Loading] signon_fps_max / loading_trace
     loading::restore::install(); // [Loading] restore_trace (needs loading_trace=1)
+#ifdef ENGINE_FIXES_DIAGNOSTICS
     loading::entities::install(); // [Loading] entity_trace / entity_sampler (needs restore_trace=1)
+#endif
     loading::sound_tables::install(); // [Loading] server_sound_tables (default off)
     loading::model_names::install(); // [Loading] model_name_cache (default off)
     loading::loose_stat::install(); // [Loading] loose_stat_fast (default off)

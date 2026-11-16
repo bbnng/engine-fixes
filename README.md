@@ -17,7 +17,7 @@ A [BLSE](https://gitlab.com/bigbannng/bloodlines-script-extender) plugin for *Va
 | `npc_move_yaw_blend` | Turns off a debug setting the game ships with, which snaps NPC legs to a new walking direction |
 | `npc_pose_interpolation` | NPC leg movement is blended every frame instead of updating 10 times a second |
 
-**Speed** (`[Startup]` and `[Loading]`; made for the Unofficial Patch 12 game files)
+**Speed** (`[Startup]` and `[Loading]`)
 
 | Setting | What it speeds up |
 |---|---|
@@ -39,7 +39,7 @@ A [BLSE](https://gitlab.com/bigbannng/bloodlines-script-extender) plugin for *Va
 | `knox_relaxed_eyes` | Relaxes Knox Gorman's wide-open eyelids; how much is adjustable |
 | `[EyeGlances]` | Calmer dialogue glances. The game's slow sweeps read as eye rolls; glances are now gentler, rarer and mostly sideways. All of it is adjustable, or glances can be switched off |
 
-Every fix checks the game files and the exact code it changes before changing anything. Newer Unofficial Patch releases that edit the game's DLLs in place should keep the bug fixes and tweaks working without an update; the speed settings, the startup companion and `restart_crash` need the Unofficial Patch 12 files. On an unknown game build, or if another mod already patched the same code, that fix stays off and `blse.log` says why.
+Every part checks the game files and the exact code it changes before changing anything. Newer Unofficial Patch releases that edit the game's DLLs in place should keep the fixes, tweaks and speedups working without an update. On an unknown game build, or if another mod already patched the same code, that part stays off and `blse.log` says why. The startup companion needs the game to run in windowed mode.
 
 ## Requirements
 
@@ -52,12 +52,7 @@ Copy the `Bin` folder from the release archive into the game folder (next to `Va
 
 ## Building
 
-Requires Visual Studio with the C++ x86 tools and Python 3.
-
-```
-build.cmd                          builds build/engine_fixes.dll and build/engine_fixes_intro.vtm
-python tools/package_release.py    writes the release and source archives to dist/
-```
+Requires Visual Studio with the C++ x86 tools. Run `build.cmd`; it builds `build/engine_fixes.dll` and `build/engine_fixes_intro.vtm`.
 
 
 ## License

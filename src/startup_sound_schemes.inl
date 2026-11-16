@@ -106,7 +106,7 @@ const unsigned tree_rva=0x154c40,enumerate_rva=0x154c90,file_rva=0x155070,dir_rv
 const unsigned resolve_rva=0x155540,prefix_rva=0x1556a0,grow_rva=0x155510,filesystem_rva=0x4a580c;
 const unsigned loader_rva=0x155400,loader_tree_site=141;
 const unsigned entry_capacity=8192,arena_capacity=1u<<18;
-// Scoped reuse budget (one VirtualAlloc block, ~412 KiB, only while a Window is open).
+// Scoped reuse budget (one heap block, ~412 KiB, only while a Window is open).
 // Local catalog model: ~142 unique patterns, ~4.7k entries, ~73 KB of names in total.
 const unsigned cache_listing_capacity=1024,cache_entry_capacity=16384,cache_arena_capacity=1u<<18;
 
@@ -148,7 +148,7 @@ void clear_cache() { cached_listings=cached_entries=cached_bytes=0; identity_set
 // Drops every cached listing and the storage. Also recovers scope state that an
 // abnormal unwind (SEH without C++ destructors) could otherwise leave set.
 void release_cache() {
-    if (cache) VirtualFree(cache,0,MEM_RELEASE);
+    if (cache) HeapFree(GetProcessHeap(),0,cache);
     cache=nullptr; clear_cache(); scope_live=false; scope_depth=0;
 }
 // Plugin-owned RAII scope for the client data-table call. Nested scopes count.
@@ -165,7 +165,7 @@ struct CacheScope {
         if (scope_depth++) { if (scope_live) ++cache_nested; scope_live=false; clear_cache(); return; }
         clear_cache(); scope_live=false;
         if (!cache_ready || !window) return;
-        if (!cache) cache=static_cast<Cache*>(VirtualAlloc(nullptr,sizeof(Cache),MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+        if (!cache) cache=static_cast<Cache*>(HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(Cache)));
         if (!cache) { ++cache_alloc_failed; return; }
         scope_live=true; ++cache_scopes;
     }

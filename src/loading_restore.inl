@@ -171,10 +171,10 @@ void BLSE_CALL report(void*) {
     if (record_open) schedule_report(); // capture still running: look again next frame
 }
 
-// vampire.dll 996e0245... (UP12): RVAs and bytes verified with IDA headless on the hash-identical
-// copy build\loading-research\vampire-UP12.dll. Each byte run is whole instructions.
+// vampire.dll 996e0245... (UP12): RVAs and bytes verified with IDA on a copy of that exact file.
+// Each byte run is whole instructions. Any vampire.dll
+// BLSE accepts for its profile is used; each site is byte-checked before it is hooked.
 struct Site { unsigned rva; unsigned char code[8]; unsigned char size; void* detour; void** original; const char* label; };
-const char* const server_hash="996e024577290cf0c91d74fcccd144089f1db2a1f8ef207844d1fa078939c3c8";
 unsigned hook_sites(std::uintptr_t base,const Site* sites,unsigned count) {
     unsigned hooked=0;
     for (unsigned i=0;i<count;++i)
@@ -212,7 +212,7 @@ void BLSE_CALL attach_task(void*) {
     auto server=GetModuleHandleW(L"vampire.dll");
     if (server && blse_owns(reinterpret_cast<std::uintptr_t>(server))) {
         server_attached=true;
-        if (!server_profile_supported() || !exact(server,server_hash)) { host->log("Loading restore: server phases unavailable (unverified vampire.dll); engine phases only."); return; }
+        if (!server_profile_supported()) { host->log("Loading restore: server phases unavailable (unverified vampire.dll); engine phases only."); return; }
         const unsigned n=hook_server(reinterpret_cast<std::uintptr_t>(server));
         char line[128]; sprintf_s(line,"Loading restore: %u/9 server phase hooks installed.",n); host->log(line);
         if (orig_entities && entity_observer.attach) entity_observer.attach(reinterpret_cast<std::uintptr_t>(server));

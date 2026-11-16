@@ -6,8 +6,8 @@
 // direction (7/8/9 up, 1/2/3 down, 4/6 sideways, 5 straight ahead), 25 units out (0x1026b580). The
 // glance moves the eye target by EyeTarget "Eye Turn Rate" per 0.1 s: 0.3 for Neutral and every
 // disposition inheriting it, against 0.9 for the normal gaze, and only advances once the eyes
-// arrive. So the eyes swept out over ~0.4-0.5 s and back just as slowly: the "eye roll"
-// (captures/eye-rolls-2026-11-12-0203.log, 02:03:47.45). A few dispositions author their own
+// arrive. So the eyes swept out over ~0.4-0.5 s and back just as slowly: the "eye roll".
+// A few dispositions author their own
 // glances: Apathy [7,8,9] at 0.2 with a 1-2 s hold (a deliberate bored eye roll), Confused [7,5,9],
 // Disgust [0,2,3], Anger/PrinceSitting [0,2,0], Damaged [0,0,0].
 //

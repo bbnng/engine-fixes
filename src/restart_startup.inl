@@ -7,14 +7,34 @@ std::uintptr_t python_base=0,engine_base=0;
 bool pending=false; int previous_gc=0; DWORD thread=0;
 using Free=BOOL(WINAPI*)(HMODULE);
 Free original_free=nullptr;
-bool exact_module(HMODULE module,const char* first,const char* second=nullptr) {
-    if (!module) return false;
-    wchar_t path[MAX_PATH];
-    if (!GetModuleFileNameW(module,path,MAX_PATH)) return false;
-    unsigned char digest[32]; std::vector<unsigned char> head; std::vector<std::uint32_t> blocks;
-    if (!read_client(path,digest,head,blocks)) return false;
-    char hex[65]; for (unsigned i=0;i<32;++i) sprintf_s(hex+2*i,3,"%02x",digest[i]);
-    return !std::strcmp(hex,first) || (second && !std::strcmp(hex,second));
+// The analyzed engine.dll, or the same build edited in place by a newer Unofficial Patch (see
+// build_check.h). Every hook below still checks its bytes.
+bool engine_known(HMODULE engine) { return build_check::known(engine,build_check::engine_profile,client_log); }
+// Python 2.1's collector state in vampire_python21.dll: the automatic collection switch (0 or 1)
+// and the three generation lists, each a circular list whose head links back to itself.
+bool python_state_valid(std::uintptr_t base) {
+    __try {
+        const int gc=*reinterpret_cast<const int*>(base+0x888e4);
+        if (gc!=0 && gc!=1) return false;
+        for (unsigned rva:{0x888c0u,0x888ccu,0x888d8u}) {
+            auto head=reinterpret_cast<retired_python::Node*>(base+rva);
+            if (!head->next || !head->prev || head->next->prev!=head || head->prev->next!=head) return false;
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// True if [base + rva, +4) lies inside the module's import address table, so it can be read.
+bool in_import_table(std::uintptr_t base,std::uint32_t rva) {
+    __try {
+        const auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic!=IMAGE_DOS_SIGNATURE) return false;
+        const auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(base+dos->e_lfanew);
+        if (nt->Signature!=IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+            nt->OptionalHeader.NumberOfRvaAndSizes<=IMAGE_DIRECTORY_ENTRY_IAT) return false;
+        const auto& iat=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
+        return iat.VirtualAddress && rva>=iat.VirtualAddress && rva+4<=iat.VirtualAddress+iat.Size &&
+               rva+4<=nt->OptionalHeader.SizeOfImage;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 int& gc_enabled() { return *reinterpret_cast<int*>(python_base+0x888e4); }
 void suspend_gc() {
@@ -43,9 +63,10 @@ bool finish_retirement() {
     char message[160]; sprintf_s(message,"Restart crash fix: the previous run's Python objects were set aside; garbage collection resumed (gc_enabled=%d).",gc_enabled());
     host->log(message); return true;
 }
+// engine.dll's FreeLibrary import slot must still hold the system FreeLibrary (or this hook).
 bool attach_free() {
     auto engine=GetModuleHandleW(L"engine.dll");
-    if (!exact_module(engine,"9d00b2c1e5edbad052fb0b514634ba54574666e12d1b408c46ce141d51ed2313")) return false;
+    if (!engine || !in_import_table(reinterpret_cast<std::uintptr_t>(engine),0x1730c8)) return false;
     engine_base=reinterpret_cast<std::uintptr_t>(engine);
     auto slot=reinterpret_cast<void**>(engine_base+0x1730c8);
     if (*slot==reinterpret_cast<void*>(free_module)) return true;
@@ -99,7 +120,7 @@ void BLSE_CALL restarted(const char*,const void*,size_t,void*) {
     // list survive, but engine imports may be new.
     if (original_free && !finish_retirement()) host->log("Restart crash fix: no game DLL unload was seen during this restart.");
     auto engine=GetModuleHandleW(L"engine.dll");
-    if (!exact_module(engine,"9d00b2c1e5edbad052fb0b514634ba54574666e12d1b408c46ce141d51ed2313")) return;
+    if (!engine_known(engine)) return;
     engine_base=reinterpret_cast<std::uintptr_t>(engine);
     if (original_free && !attach_free()) host->log("Restart crash fix: could not attach to the restarted engine; the next restart is not covered.");
     start_trace();
@@ -108,7 +129,7 @@ void install() {
     if (!enabled("restart_crash") && !enabled("startup_trace","0")) return;
     thread=GetCurrentThreadId();
     auto engine=GetModuleHandleW(L"engine.dll");
-    if (!exact_module(engine,"9d00b2c1e5edbad052fb0b514634ba54574666e12d1b408c46ce141d51ed2313")) {
+    if (!engine_known(engine)) {
         host->log("Startup speedups and restart crash fix disabled: unknown engine.dll build."); return;
     }
     engine_base=reinterpret_cast<std::uintptr_t>(engine);
@@ -117,13 +138,12 @@ void install() {
         host->log("Restart crash fix disabled: engine restart event unavailable."); return;
     }
     if (!enabled("restart_crash")) return;
+    // Python's internal layout is only known for the analyzed vampire_python21.dll build; its
+    // collector state is also checked in memory.
     auto python=GetModuleHandleW(L"vampire_python21.dll");
-    auto exe=GetModuleHandleW(nullptr);
-    const bool legacy=exact_module(exe,"80d73e7454241b64c494ded4782b0a5f9d6e2da06856c95dbd1f7a78bc36eaf9");
-    if (!BLSE_HOST_HAS(host,hook_pointer) || !host->hook_pointer ||
-        (!legacy && !exact_module(exe,"e195b0a6f676b9400a47eee2df020da0b0beba8293ecdc3ebb6f6dcbf44f2ad7")) ||
-        !exact_module(python,"2ce854ddd5191721f38ccbe6c19988655632c5c9a79fdfef03a4cd8f49b04645","65a92dda7b8fd1ca8668cc8924d6300a895603b719e19c3b537751e434ec4ea3")) {
-        host->log("Restart crash fix disabled: unknown Vampire.exe or vampire_python21.dll, or BLSE too old."); return;
+    if (!BLSE_HOST_HAS(host,hook_pointer) || !host->hook_pointer) { host->log("Restart crash fix disabled: BLSE too old."); return; }
+    if (!build_check::known(python,build_check::python_profile,client_log) || !python_state_valid(reinterpret_cast<std::uintptr_t>(python))) {
+        host->log("Restart crash fix disabled: unknown vampire_python21.dll build."); return;
     }
     python_base=reinterpret_cast<std::uintptr_t>(python);
     retired_python::initialize(retired);

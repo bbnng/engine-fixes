@@ -3,7 +3,7 @@
 // Startup companion for the UP loader (Bin/loader/engine_fixes_intro.vtm). No BLSE dependency and no engine calls from
 // loaded_engine: the executable may not have resolved the engine imports yet.
 #include "intro_worker.h"
-#include <bcrypt.h>
+#include "build_check.h"
 #include <shellapi.h>
 #include <cstdint>
 #include <cstdio>
@@ -34,7 +34,20 @@ unsigned char initial_branch=0x75;
 wchar_t ini_path[MAX_PATH]={},log_path[MAX_PATH]={},root[MAX_PATH]={};
 LARGE_INTEGER frequency={},origin={};
 SRWLOCK log_lock=SRWLOCK_INIT;
-void* trampolines[32]={}; unsigned trampoline_count=0;
+// Resume address for paint_bridge: engine.dll's paint routine just past the 5 bytes the
+// detour replaced. Set by install(); the engine is checked to hold exactly those bytes.
+std::uintptr_t paint_resume=0;
+// Runs the paint routine's original first instructions (sub esp,14h; push ebx; push ebp),
+// then continues inside engine.dll. A fixed stub in this module, so no code is written to
+// newly allocated memory.
+__declspec(naked) void paint_bridge() {
+    __asm {
+        sub esp, 0x14
+        push ebx
+        push ebp
+        jmp dword ptr [paint_resume]
+    }
+}
 
 void log(const char* message) {
     if (!log_path[0]) return;
@@ -56,21 +69,6 @@ bool paths() {
     const DWORD exe_length=GetModuleFileNameW(nullptr,root,MAX_PATH);
     if (!exe_length || exe_length>=MAX_PATH || !remove_leaf(root)) return false;
     return true;
-}
-bool exact_hash(HMODULE module,const char* expected) {
-    wchar_t path[MAX_PATH]; const DWORD n=GetModuleFileNameW(module,path,MAX_PATH);
-    if (!n || n>=MAX_PATH) return false;
-    HANDLE file=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
-    if(file==INVALID_HANDLE_VALUE) return false;
-    BCRYPT_ALG_HANDLE alg=nullptr; BCRYPT_HASH_HANDLE hash=nullptr;
-    bool ok=BCryptOpenAlgorithmProvider(&alg,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0;
-    if(ok) ok=BCryptCreateHash(alg,&hash,nullptr,0,nullptr,0,0)>=0;
-    unsigned char bytes[16384],digest[32]; DWORD got=0;
-    while(ok) { if(!ReadFile(file,bytes,sizeof bytes,&got,nullptr)) {ok=false;break;} if(!got)break; ok=BCryptHashData(hash,bytes,got,0)>=0; }
-    if(ok) ok=BCryptFinishHash(hash,digest,sizeof digest,0)>=0;
-    if(hash) BCryptDestroyHash(hash); if(alg) BCryptCloseAlgorithmProvider(alg,0); CloseHandle(file);
-    char hex[65]={}; if(ok) for(unsigned i=0;i<32;++i) sprintf_s(hex+2*i,3,"%02x",digest[i]);
-    return ok && !strcmp(hex,expected);
 }
 bool write_bytes(void* address,const void* bytes,size_t size) {
     DWORD old; if(!VirtualProtect(address,size,PAGE_EXECUTE_READWRITE,&old)) return false;
@@ -203,7 +201,7 @@ bool install_present_slot(std::uintptr_t material) {
 }
 bool install_present() {
     auto material=GetModuleHandleW(L"materialsystem.dll");
-    if(!material || !exact_hash(material,"e7e694c75843c1cc2af360b3606ef55cd0558ae445c9fc087e56fdf3816cdc9b"))return false;
+    if(!material || !build_check::known(material,build_check::material_profile,log))return false;
     return install_present_slot(reinterpret_cast<std::uintptr_t>(material));
 }
 void stop_worker(bool abort) {
@@ -310,20 +308,17 @@ bool install(HMODULE engine) {
     const unsigned char expected[]={0x83,0xec,0x14,0x53,0x55};
     if(std::memcmp(entry,expected,5) || *slot!=reinterpret_cast<void*>(base+0xfc0c0) ||
        *reinterpret_cast<unsigned char*>(base+0xfcc87)!=0x6a || *reinterpret_cast<unsigned char*>(base+0xfcc88)!=0x65 ||
-       (branch[0]!=0x75 && branch[0]!=0xeb) || branch[1]!=0x44 || trampoline_count==32) return false;
+       (branch[0]!=0x75 && branch[0]!=0xeb) || branch[1]!=0x44) return false;
     initial_branch=branch[0];
-    auto bridge=static_cast<unsigned char*>(VirtualAlloc(nullptr,16,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE)); if(!bridge)return false;
-    std::memcpy(bridge,entry,5); jump(bridge+5,reinterpret_cast<std::uintptr_t>(bridge+5),entry+5);
-    DWORD previous; if(!VirtualProtect(bridge,16,PAGE_EXECUTE_READ,&previous)) {VirtualFree(bridge,0,MEM_RELEASE);return false;}
-    FlushInstructionCache(GetCurrentProcess(),bridge,16);
+    const std::uintptr_t previous_resume=paint_resume; paint_resume=reinterpret_cast<std::uintptr_t>(entry+5);
     unsigned char detour[5]; jump(detour,reinterpret_cast<std::uintptr_t>(entry),reinterpret_cast<void*>(paint));
     auto old_load=*slot; void* new_load=reinterpret_cast<void*>(load);
-    if(!write_bytes(slot,&new_load,sizeof new_load)) {VirtualFree(bridge,0,MEM_RELEASE);return false;}
-    original_paint=reinterpret_cast<Paint>(bridge); original_load=reinterpret_cast<Load>(old_load);
+    if(!write_bytes(slot,&new_load,sizeof new_load)) {paint_resume=previous_resume;return false;}
+    original_paint=reinterpret_cast<Paint>(reinterpret_cast<void*>(paint_bridge)); original_load=reinterpret_cast<Load>(old_load);
     if(!write_bytes(entry,detour,5)) {
-        write_bytes(slot,&old_load,sizeof old_load); VirtualFree(bridge,0,MEM_RELEASE); return false;
+        write_bytes(slot,&old_load,sizeof old_load); paint_resume=previous_resume; return false;
     }
-    trampolines[trampoline_count++]=bridge; return true;
+    return true;
 }
 }
 
@@ -338,7 +333,7 @@ extern "C" __declspec(dllexport) void __cdecl loaded_engine() {
     }
     // Raw QueryPerformanceCounter origin of this log's clock, so its lines can be aligned
     // exactly with engine_fixes' startup report (trace_origin_qpc, same system-wide counter).
-    char anchor[160]; sprintf_s(anchor,"loaded_engine: Engine Fixes and Tweaks intro companion 1.2 (qpc_origin=%lld qpc_frequency=%lld)",origin.QuadPart,frequency.QuadPart);
+    char anchor[160]; sprintf_s(anchor,"loaded_engine: Engine Fixes and Tweaks intro companion 1.2.1 (qpc_origin=%lld qpc_frequency=%lld)",origin.QuadPart,frequency.QuadPart);
     log(anchor);
     auto engine=GetModuleHandleW(L"engine.dll");
     if(enabled && base==reinterpret_cast<std::uintptr_t>(engine)) {
@@ -351,8 +346,9 @@ extern "C" __declspec(dllexport) void __cdecl loaded_engine() {
     destroy(worker); active=attempted=waiting_ready=load_returned=suppressed=enabled=skip_videos=false; game=nullptr;
     present_armed=false;presents=0;main_thread=GetCurrentThreadId();
     if(!GetPrivateProfileIntW(L"IntroFirst",L"enabled",0,ini_path)) {log("disabled in companion INI");return;}
-    if(!exact_hash(GetModuleHandleW(nullptr),"e195b0a6f676b9400a47eee2df020da0b0beba8293ecdc3ebb6f6dcbf44f2ad7") ||
-       !engine || !exact_hash(engine,"9d00b2c1e5edbad052fb0b514634ba54574666e12d1b408c46ce141d51ed2313")) {log("unsupported executable or engine; unchanged");return;}
+    // The analyzed engine.dll or the same build edited in place by a newer Unofficial Patch
+    // (build_check.h); install() and suppress() still check every byte they change.
+    if(!engine || !build_check::known(engine,build_check::engine_profile,log)) {log("unsupported engine; unchanged");return;}
     enabled=install(engine); log(enabled?"early hooks installed":"early hook check failed; unchanged");
     if(enabled && GetPrivateProfileIntW(L"IntroFirst",L"skip_videos",0,ini_path)) {
         skip_videos=suppress();

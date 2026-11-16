@@ -213,7 +213,7 @@ void install() {
     if (!BLSE_HOST_HAS(host,add_task) || !host->add_task || !BLSE_HOST_HAS(host,hook_function) || !host->hook_function ||
         !BLSE_HOST_HAS(host,subscribe) || !host->subscribe) { host->log("Loading signon disabled: unsupported API."); return; }
     auto module=GetModuleHandleW(L"engine.dll");
-    if (!exact(module,"9d00b2c1e5edbad052fb0b514634ba54574666e12d1b408c46ce141d51ed2313")) { host->log("Loading signon disabled: unsupported engine."); return; }
+    if (!known(module,build_check::engine_profile)) { host->log("Loading signon disabled: unsupported engine."); return; }
     install_at(reinterpret_cast<std::uintptr_t>(module),trace,pacing);
 }
 // The verified engine image at `base`.

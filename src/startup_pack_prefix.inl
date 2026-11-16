@@ -223,7 +223,7 @@ struct Timer {
     ~Timer() { ++counter.calls; counter.ticks+=now()-begin; }
 };
 void release() {
-    if (arena) VirtualFree(arena,0,MEM_RELEASE);
+    if (arena) HeapFree(GetProcessHeap(),0,arena);
     arena=nullptr; used=0; pack_count=0;
 }
 // Index lifetime (the client data-table Window). Indices never outlive it.
@@ -393,7 +393,7 @@ bool index(Pack& p) {
 Pack* find(const void* path) {
     for (unsigned i=0;i<pack_count;++i) if (packs[i].path==path) return packs[i].usable?&packs[i]:nullptr;
     if (pack_count==max_packs) return nullptr;
-    if (!arena) arena=static_cast<char*>(VirtualAlloc(nullptr,arena_capacity,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+    if (!arena) arena=static_cast<char*>(HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,arena_capacity));
     if (!arena) return nullptr;
     Pack& p=packs[pack_count++]; p=Pack{}; p.path=path; p.tree=live_tree(path);
     const unsigned mark=used; Timer t(build_time); ++builds;

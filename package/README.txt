@@ -1,4 +1,4 @@
-Engine Fixes and Tweaks 1.2
+Engine Fixes and Tweaks 1.2.1
 for Vampire: The Masquerade - Bloodlines
 ==========================================
 
@@ -13,14 +13,12 @@ REQUIREMENTS
 - BLSE (Bloodlines Script Extender) 0.6.1 or newer.
 - With Unofficial Patch 12.0 or newer: BLSE 0.6.3 or newer. With an older BLSE, the
   fixes for NPCs and eyes that live in vampire.dll stay off on these patch versions.
-- The faster startup and loading, the restart crash fix and the startup companion are
-  made for the Unofficial Patch 12 game files. The startup companion also needs the game
-  to run in windowed mode. On other versions or in full screen they stay off and the game
-  starts and loads as usual.
+- The startup companion needs the game to run in windowed mode. In full screen it stays
+  off and the game starts as usual.
 
-Every fix checks the game files and the exact code it changes before it touches anything.
-Newer Unofficial Patch releases that edit the game's DLLs in place should keep the bug
-fixes and tweaks working without an update. On a game build it does not recognize, where a
+Every part checks the game files and the exact code it changes before it touches anything.
+Newer Unofficial Patch releases that edit the game's DLLs in place should keep the fixes,
+tweaks and speedups working without an update. On a game build it does not recognize, where a
 patch changed the code a fix needs, or if another mod already changed the same code, that
 part stays off and Bin\loader\blse\blse.log says why. The rest of the game is not affected.
 
