@@ -24,7 +24,7 @@
 // keyed by the enclosing phase. Nothing is skipped, cached, reordered or changed: every wrapper
 // passes all arguments and the callee's edx:eax through unchanged, and stack cleanup matches each
 // native's ret N. Active only while the loading probe is collecting a load (loading_trace=1);
-// [Loading] restore_trace=0 turns it off.
+// [Loading] restore_trace=1 (off when missing).
 #ifndef ENGINE_FIXES_LOADING_RESTORE_INL
 #define ENGINE_FIXES_LOADING_RESTORE_INL
 namespace loading {
@@ -227,17 +227,18 @@ void BLSE_CALL on_restart(const char*,const void*,size_t,void*) {
     gone=true; record_open=false; depth=0;
     host->log("Loading restore phases stopped after engine restart (use a fresh process for further captures).");
 }
-bool configured_off() {
+// Off when missing, as every [Loading] setting.
+bool configured() {
     if (!BLSE_HOST_HAS(host,ini_get) || !host->ini_get) return false;
     char value[8]={}; size_t size=0;
-    return host->ini_get(host->context,"engine_fixes","Loading","restore_trace",value,sizeof value,&size) && size<sizeof value && value[0]=='0';
+    return host->ini_get(host->context,"engine_fixes","Loading","restore_trace",value,sizeof value,&size) && size<sizeof value && value[0] && value[0]!='0';
 }
 void install_at(std::uintptr_t engine);
 // Once per process, in BLSE_PluginLoad after loading::install() (main thread, engine loaded).
 void install() {
     if (attempted) return; attempted=true;
     if (!loading::enabled_probe) return;            // probe off or refused: nothing to attribute to
-    if (configured_off()) { host->log("Loading restore phases off ([Loading] restore_trace=0)."); return; }
+    if (!configured()) return;
     install_at(loading::engine_base);
 }
 void install_at(std::uintptr_t engine) {

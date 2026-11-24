@@ -8,8 +8,8 @@
 // direction (7/8/9 up, 1/2/3 down, 4/6 sideways, 5 straight ahead), 25 units out (0x1026b580). The
 // glance moves the eye target by EyeTarget "Eye Turn Rate" per 0.1 s: 0.3 for Neutral and every
 // disposition inheriting it, against 0.9 for the normal gaze, and only advances once the eyes
-// arrive. So the eyes swept out over ~0.4-0.5 s and back just as slowly: the "eye roll"
-//. A few dispositions author their own
+// arrive. So the eyes swept out over ~0.4-0.5 s and back just as slowly: the "eye roll".
+// A few dispositions author their own
 // glances: Apathy [7,8,9] at 0.2 with a 1-2 s hold (a deliberate bored eye roll), Confused [7,5,9],
 // Disgust [0,2,3], Anger/PrinceSitting [0,2,0], Damaged [0,0,0].
 //
@@ -134,7 +134,7 @@ int __fastcall shaped_eye_fidget_point(void* table, void*, int index, int step) 
     if (!index_glances_shaped(table, index)) return original_eye_fidget_point(table, index, step);
     if (step != 0 || !glance.allow) return -1;  // one glance per sequence (game's random mode); -1 = none
     const int type = pick_glance_direction(glance.weights, glance_random());
-    if (!type) return original_eye_fidget_point(table, index, step);
+    if (!type) return -1;  // every direction has weight 0 ("never look that way"): no glance
     ++glance_count;
     return type;
 }

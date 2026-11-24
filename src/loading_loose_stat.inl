@@ -41,7 +41,7 @@ Record open,pending[4];
 unsigned pending_count=0,dropped=0;
 void close_record() {
     if(!open.id) return;
-    if(pending_count<_countof(pending)) pending[pending_count++]=open; else ++dropped;
+    if(open.id<=logged_captures) { if(pending_count<_countof(pending)) pending[pending_count++]=open; else ++dropped; }
     open=Record{};
 }
 bool capture_over(unsigned id) { return !(active && current.id==id && current.kind!=startup && !current.first_sim); }

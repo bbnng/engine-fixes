@@ -18,7 +18,7 @@
 #include "build_check.h"
 #pragma comment(lib, "bcrypt.lib")
 
-BLSE_PLUGIN_INFO("engine_fixes", "1.2.1", "Engine Fixes and Tweaks", "Engine and game-code bug fixes for Bloodlines, faster startup and loading, plus optional tweaks", "0.6", nullptr);
+BLSE_PLUGIN_INFO("engine_fixes", "1.3", "Engine Fixes and Tweaks", "Engine and game-code bug fixes for Bloodlines, faster startup and loading, plus optional tweaks", "0.6.1", nullptr);
 
 namespace {
 const BLSE_HostAPI* host;
@@ -605,8 +605,6 @@ void BLSE_CALL rearm_after_restart(const char*, const void*, size_t, void*) {
     server_base = 0;
     client = 0;
     glance_server = 0;
-    water_clip_plane::reset();
-    dsp_audio::reset();
     perf_runtime::reset_on_restart();
     reset_npc_state(nullptr, nullptr, 0, nullptr);
     if (!startup_subscription) startup_subscription = host->subscribe(host->context, BLSE_MSG_GAME_FRAME, start_when_ready, nullptr);

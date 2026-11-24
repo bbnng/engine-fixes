@@ -68,15 +68,13 @@ inline void __cdecl dsp_process_hook(int idsp, int* pfront, int* prear, int coun
     orig_dsp_process(idsp, pfront, prear, count);
 }
 
-inline void reset() {
-    orig_mdy_alloc = nullptr;
-    orig_dsp_process = nullptr;
-    g_idsp_spatial = nullptr;
-}
-
 inline void install() {
     HMODULE engine = GetModuleHandleW(L"engine.dll");
     if (!engine) return;
+    if (!restart_startup::engine_known(engine)) {
+        host->log("DSP spatial fix disabled: unknown engine.dll build.");
+        return;
+    }
     if (!perf_runtime::module_range_ok(engine, kSxSpatialRva, 17) ||
         !perf_runtime::module_range_ok(engine, kMdyAllocRva, 16) ||
         !perf_runtime::module_range_ok(engine, kDspProcessRva, 16) ||
@@ -88,6 +86,13 @@ inline void install() {
 
     auto* base = reinterpret_cast<unsigned char*>(engine);
     const auto b = reinterpret_cast<std::uintptr_t>(base);
+
+    if (orig_mdy_alloc && orig_dsp_process &&
+        g_idsp_spatial == reinterpret_cast<const int*>(base + kIdspSpatialRva) &&
+        base[kDspProcessRva] == 0xE9 && base[kMdyAllocRva] == 0xE9 && base[kSxSpatialRva] == 0xE9) {
+        host->log("DSP spatial fix still enabled (engine.dll was not reloaded).");
+        return;
+    }
 
     static const unsigned char kSxSpatialHead[12] = {
         0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0x28, 0x01, 0x00, 0x00
@@ -135,26 +140,30 @@ inline void install() {
         }
     }
     if (sx_ok && dsp_ok) {
+        // The bypass first: without it the wall-delay updates stay native too, so the effect never
+        // runs with stale delays.
         void* orig_sx = nullptr;
         void* orig_dsp = nullptr;
-        g_idsp_spatial = reinterpret_cast<const int*>(base + kIdspSpatialRva);
-        if (host->hook_function(host->context, base + kSxSpatialRva,
-                kSxSpatialDisplaced, sizeof(kSxSpatialDisplaced),
-                reinterpret_cast<void*>(&sx_spatial_hook), &orig_sx) == BLSE_HOOK_OK) {
-            ++hooked;
-        }
         if (host->hook_function(host->context, base + kDspProcessRva,
                 kDspProcessDisplaced, sizeof(kDspProcessDisplaced),
                 reinterpret_cast<void*>(&dsp_process_hook), &orig_dsp) == BLSE_HOOK_OK) {
             orig_dsp_process = reinterpret_cast<DspProcessFn>(orig_dsp);
+            g_idsp_spatial = reinterpret_cast<const int*>(base + kIdspSpatialRva);
             ++hooked;
+            if (host->hook_function(host->context, base + kSxSpatialRva,
+                    kSxSpatialDisplaced, sizeof(kSxSpatialDisplaced),
+                    reinterpret_cast<void*>(&sx_spatial_hook), &orig_sx) == BLSE_HOOK_OK) {
+                ++hooked;
+            }
         }
     }
 
     if (hooked == 3) {
         host->log("DSP spatial fix installed: master-bus dsp_spatial wall-delay bypassed and MDY_Alloc +INF rate guarded.");
     } else {
-        host->log("DSP spatial fix: partial or mismatched engine.dll bytes; check engine.dll build.");
+        char message[160];
+        sprintf_s(message, "DSP spatial fix: %d of 3 hooks installed (byte check or hook conflict in engine.dll); the rest stays as in the game.", hooked);
+        host->log(message);
     }
 }
 

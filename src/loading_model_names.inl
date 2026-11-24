@@ -22,7 +22,7 @@ Record pending[4];
 void close_record() {
     if(!open_id) return;
     const Record r={open_id,cache.queries,cache.hits,cache.misses,cache.checks,cache.updates,cache.unsupported,native_calls,fast_ticks,native_ticks};
-    if(pending_count<_countof(pending)) pending[pending_count++]=r; else ++dropped;
+    if(r.id<=logged_captures) { if(pending_count<_countof(pending)) pending[pending_count++]=r; else ++dropped; }
     open_id=0; cache.clear(); fast_ticks=native_ticks=0; native_calls=0;
 }
 void finished(const Session& s) { if(GetCurrentThreadId()==main_thread && s.id==open_id) close_record(); }

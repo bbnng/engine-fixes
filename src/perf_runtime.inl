@@ -21,7 +21,9 @@
 namespace perf_runtime {
 
 // Vectorized 4-wide SSE2 sincos for float32 angles in radians.
-// Uses Cody-Waite range reduction by pi/2 and Cephes minimax polynomials (max error < 1.5e-7).
+// Uses Cody-Waite range reduction by pi/4 and Cephes minimax polynomials (max error < 1.5e-7).
+// Altered version of sincos_ps from sse_mathfun.h (Copyright (C) 2007 Julien Pommier, zlib license,
+// based on the Cephes math library): see NOTICE.
 static __forceinline void sincos_ps(__m128 x, __m128& out_sin, __m128& out_cos) {
     const __m128 sign_mask = _mm_set1_ps(-0.0f);
     const __m128 inv_sign_mask = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));
@@ -277,7 +279,7 @@ inline float __fastcall fast_get_anim_time_interval(const unsigned char* self) {
     return anim_time_interval_impl(anim_time, old_anim_time, curtime);
 }
 
-// --- Wave 5a: Fast O(1) CCvar::FindVar (engine.dll+0x400E0) ---
+// --- Fast O(1) CCvar::FindVar (engine.dll+0x400E0) ---
 // Vanilla linearly scans the 1,700+ node ConCommandBase linked list with __strcmpi on every lookup.
 inline const unsigned char kAsciiLower[256] = {
     0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
@@ -313,21 +315,23 @@ inline int __cdecl fast_stricmp_lut(const char* a, const char* b) {
     }
 }
 
-inline int __cdecl fast_strnicmp_lut(const char* a, const char* b, int n) {
-    if (n <= 0) return 0;
+// vstdlib.dll's own comparison helpers return only 0 (equal) or -1 (any difference), never +1.
+// Callers may have built ordered containers with that result before these replacements are
+// installed, so it is kept exactly.
+inline int __cdecl fast_q_strncasecmp(const char* a, const char* b, int n) {
     const auto* pa = reinterpret_cast<const unsigned char*>(a);
     const auto* pb = reinterpret_cast<const unsigned char*>(b);
-    while (n-- > 0) {
-        unsigned char ca = *pa++;
-        unsigned char cb = *pb++;
-        if (ca != cb) {
-            ca = kAsciiLower[ca];
-            cb = kAsciiLower[cb];
-            if (ca != cb) return ca < cb ? -1 : 1;
-        }
+    for (; n > 0; --n) {
+        const unsigned char ca = *pa++;
+        const unsigned char cb = *pb++;
+        if (ca != cb && kAsciiLower[ca] != kAsciiLower[cb]) return -1;
         if (ca == 0) return 0;
     }
     return 0;
+}
+
+inline int __cdecl fast_q_strcasecmp(const char* a, const char* b) {
+    return fast_q_strncasecmp(a, b, 99999); // the limit vstdlib.dll passes
 }
 
 inline char* __cdecl fast_strnlwr_lut(char* s, int /*count*/) {
@@ -340,19 +344,12 @@ inline char* __cdecl fast_strnlwr_lut(char* s, int /*count*/) {
     return s;
 }
 
-inline void* __cdecl fast_q_memset(void* dst, int fill, int count) {
-    if (dst && count > 0) std::memset(dst, fill, static_cast<std::size_t>(count));
-    return dst;
-}
-inline void* __cdecl fast_q_memcpy(void* dst, const void* src, int count) {
-    if (dst && src && count > 0) std::memmove(dst, src, static_cast<std::size_t>(count));
-    return dst;
-}
-inline int __cdecl fast_q_strcmp(const char* a, const char* b) {
-    return std::strcmp(a, b);
-}
 inline int __cdecl fast_q_strncmp(const char* a, const char* b, int count) {
-    return count > 0 ? std::strncmp(a, b, static_cast<std::size_t>(count)) : 0;
+    for (; count > 0; --count, ++a, ++b) {
+        if (*a != *b) return -1;
+        if (*a == '\0') return 0;
+    }
+    return 0;
 }
 
 struct CvarLookupCache {
@@ -361,7 +358,8 @@ struct CvarLookupCache {
     struct Slot {
         std::uint32_t hash;
         const char* name;
-        void* node;
+        unsigned char* node;
+        unsigned char* previous; // the list node before `node` (nullptr: the head)
     };
     Slot slots[kCap] = {};
     void* cached_head = nullptr;
@@ -387,7 +385,8 @@ struct CvarLookupCache {
         cached_head = head;
         overflowed = false;
         std::size_t count = 0;
-        for (auto* cur = reinterpret_cast<unsigned char*>(head); cur; cur = *reinterpret_cast<unsigned char**>(cur + 8)) {
+        unsigned char* previous = nullptr;
+        for (auto* cur = reinterpret_cast<unsigned char*>(head); cur; previous = cur, cur = *reinterpret_cast<unsigned char**>(cur + 8)) {
             auto* base = *reinterpret_cast<unsigned char**>(cur + 4);
             const char* name = base ? *reinterpret_cast<const char**>(base + 0x10) : nullptr;
             if (!name) continue;
@@ -399,7 +398,7 @@ struct CvarLookupCache {
             std::size_t idx = h & (kCap - 1);
             for (;;) {
                 if (slots[idx].hash == 0) {
-                    slots[idx] = {h, name, cur};
+                    slots[idx] = {h, name, cur, previous};
                     ++count;
                     break;
                 }
@@ -412,23 +411,47 @@ struct CvarLookupCache {
         }
     }
 
+    // Still linked where it was when cached? CCvar::UnlinkVariables (engine.dll+0x40160) removes a
+    // DLL's nodes and reverses the list, so after two calls (client, then server) the old head can be
+    // back in place while cached nodes belong to an unloaded DLL. Every unlinked node loses its link,
+    // and the node before it gets another one.
+    static bool still_linked(const Slot& s, const void* head) {
+        __try {
+            return s.previous ? *reinterpret_cast<unsigned char* const*>(s.previous + 8) == s.node : s.node == head;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
     void* find(void* head, const char* name) {
         if (!head || !name) return nullptr;
         if (head != cached_head) rebuild(head);
+        void* node = nullptr;
+        if (lookup(head, name, node)) return node;
+        rebuild(head); // the list changed behind the same head
+        return lookup(head, name, node) ? node : nullptr;
+    }
+
+    // False when a cached entry that could match is stale; `node` is the result otherwise.
+    bool lookup(void* head, const char* name, void*& node) {
+        node = nullptr;
         if (overflowed) {
             for (auto* cur = reinterpret_cast<unsigned char*>(head); cur; cur = *reinterpret_cast<unsigned char**>(cur + 8)) {
                 auto* base = *reinterpret_cast<unsigned char**>(cur + 4);
                 const char* n = base ? *reinterpret_cast<const char**>(base + 0x10) : nullptr;
-                if (n && fast_stricmp_lut(name, n) == 0) return cur;
+                if (n && fast_stricmp_lut(name, n) == 0) { node = cur; return true; }
             }
-            return nullptr;
+            return true;
         }
         const std::uint32_t h = hash_ci(name);
         std::size_t idx = h & (kCap - 1);
         for (;;) {
             const std::uint32_t sh = slots[idx].hash;
-            if (sh == 0) return nullptr;
-            if (sh == h && fast_stricmp_lut(slots[idx].name, name) == 0) return slots[idx].node;
+            if (sh == 0) return true;
+            if (sh == h) {
+                if (!still_linked(slots[idx], head)) return false; // before its name is read
+                if (fast_stricmp_lut(slots[idx].name, name) == 0) { node = slots[idx].node; return true; }
+            }
             idx = (idx + 1) & (kCap - 1);
         }
     }
@@ -442,7 +465,7 @@ inline void* __cdecl fast_cvar_find_var(const char* name) {
     return g_cvar_cache.find(*g_cvar_list_head, name);
 }
 
-// --- Wave 5b: Fast 64-bit CDeltaBitsWriter / CDeltaBitsReader (engine.dll+0x5F1E0, +0x5F360) ---
+// --- Fast 64-bit CDeltaBitsWriter / CDeltaBitsReader (engine.dll+0x5F1E0, +0x5F360) ---
 struct BfBuf {
     unsigned char* data; // +0x00
     int nDataBytes;      // +0x04
@@ -649,7 +672,7 @@ inline std::uint32_t __fastcall fast_delta_read_next_prop_index(DeltaBitsReader*
     return 0;
 }
 
-// --- Wave 5d: Fast 64-bit SendProp Float_Decode / Int_Compare / Float_Compare ---
+// --- Fast 64-bit SendProp Float_Decode / Int_Compare / Float_Compare ---
 // Replaces x87 fdiv + 4 stack store-forwarding stalls in Float_Decode (engine.dll+0x60820) and
 // word-boundary bit loops in Int_Compare (+0x60500) & Float_Compare (+0x609E0) with 64-bit loads + LUT.
 struct DecodeInfo {
@@ -746,9 +769,10 @@ inline int __cdecl fast_float_compare(const unsigned char* prop, BfBuf* b1, BfBu
         return v1 != v2 ? 1 : 0;
     }
     if (flags & 0x20u) {
-        const float f1 = g_read_bit_normal(b1);
-        const float f2 = g_read_bit_normal(b2);
-        return !(f1 == f2) ? 1 : 0;
+        // As the native code: the 12 raw bits (sign and 11-bit fraction), not the decoded values.
+        const std::uint32_t v1 = bf_read_ubit_fast(b1, 12);
+        const std::uint32_t v2 = bf_read_ubit_fast(b2, 12);
+        return v1 != v2 ? 1 : 0;
     }
     const int nbits = *reinterpret_cast<const int*>(prop + 0x0C);
     const std::uint32_t v1 = bf_read_ubit_fast(b1, nbits);
@@ -756,12 +780,11 @@ inline int __cdecl fast_float_compare(const unsigned char* prop, BfBuf* b1, BfBu
     return v1 != v2 ? 1 : 0;
 }
 
+// Only caches are dropped. The pointers the replacements read stay: if a module was not reloaded its
+// replacements are still in place and need them, and otherwise the next install sets them again.
 inline void reset_on_restart() {
     g_monitor_cache.clear();
-    orig_monitor_cast = nullptr;
-    g_client_engine_ptr = nullptr;
     g_cvar_cache.clear();
-    g_cvar_list_head = nullptr;
 }
 
 inline bool module_range_ok(HMODULE mod, std::size_t rva, std::size_t size) {
@@ -822,8 +845,12 @@ inline void install_common() {
         }
     }
 
-    // Wave 5a: Fast O(1) CCvar::FindVar (engine.dll+0x400E0)
+    // Fast O(1) CCvar::FindVar (engine.dll+0x400E0)
     HMODULE engine = GetModuleHandleW(L"engine.dll");
+    if (engine && !restart_startup::engine_known(engine)) {
+        host->log("Fast CVar lookup and network codec disabled: unknown engine.dll build.");
+        engine = nullptr;
+    }
     if (engine && enabled("fast_cvar_lookup", "1") && module_range_ok(engine, 0x400E0, 24) &&
         module_range_ok(engine, 0xA3F45C, 4)) {
         auto* base = reinterpret_cast<unsigned char*>(engine);
@@ -843,7 +870,7 @@ inline void install_common() {
         }
     }
 
-    // Wave 5b: Fast 64-bit CDeltaBitsWriter / CDeltaBitsReader (engine.dll+0x5F1E0, +0x5F360)
+    // Fast 64-bit CDeltaBitsWriter / CDeltaBitsReader (engine.dll+0x5F1E0, +0x5F360)
     if (engine && enabled("fast_delta_bits", "1") && module_range_ok(engine, 0x5F1E0, 0x200)) {
         auto* base = reinterpret_cast<unsigned char*>(engine);
         static const unsigned char kWritePropHead[20] = {
@@ -868,7 +895,7 @@ inline void install_common() {
         }
     }
 
-    // Wave 5d: Fast 64-bit SendProp Float_Decode / Int_Compare / Float_Compare (engine.dll+0x60820, +0x60500, +0x609E0)
+    // Fast 64-bit SendProp Float_Decode / Int_Compare / Float_Compare (engine.dll+0x60820, +0x60500, +0x609E0)
     if (engine && enabled("fast_prop_codec", "1") && module_range_ok(engine, 0x60500, 0x600)) {
         auto* base = reinterpret_cast<unsigned char*>(engine);
         static const unsigned char kIntCompareHead[20] = {
@@ -883,16 +910,25 @@ inline void install_common() {
             0x53, 0x55, 0x56, 0x8B, 0x74, 0x24, 0x10, 0x8B, 0x46, 0x3C,
             0xA8, 0x02, 0x57, 0x74, 0x32, 0x8B, 0x4C, 0x24, 0x18, 0xE8
         };
-        g_read_bit_coord = reinterpret_cast<ReadBitCoordFn>(base + 0x6FC0);
-        g_read_bit_normal = reinterpret_cast<ReadBitCoordFn>(base + 0x75B0);
+        // The two native readers the replacements call.
+        static const unsigned char kReadBitCoordHead[16] = {0x83, 0xEC, 0x14, 0x53, 0x55, 0x8B, 0xC1, 0x8B, 0x50, 0x0C, 0x56, 0x57, 0x8B, 0x78, 0x08, 0x33};
+        static const unsigned char kReadBitNormalHead[16] = {0x83, 0xEC, 0x08, 0x53, 0x55, 0x8B, 0xC1, 0x8B, 0x50, 0x0C, 0x56, 0x8B, 0x70, 0x08, 0x57, 0x8D};
+        const bool readers_ok = std::memcmp(base + 0x6FC0, kReadBitCoordHead, sizeof(kReadBitCoordHead)) == 0 &&
+                                std::memcmp(base + 0x75B0, kReadBitNormalHead, sizeof(kReadBitNormalHead)) == 0;
+        if (readers_ok) {
+            g_read_bit_coord = reinterpret_cast<ReadBitCoordFn>(base + 0x6FC0);
+            g_read_bit_normal = reinterpret_cast<ReadBitCoordFn>(base + 0x75B0);
+        } else {
+            host->log("Fast SendProp Float_Decode/Float_Compare disabled: native bit readers differ.");
+        }
         int hooked = 0;
-        if (std::memcmp(base + 0x60820, kFloatDecodeHead, sizeof(kFloatDecodeHead)) == 0 &&
+        if (readers_ok && std::memcmp(base + 0x60820, kFloatDecodeHead, sizeof(kFloatDecodeHead)) == 0 &&
             perf_math::write_jmp5(base + 0x60820, reinterpret_cast<void*>(fast_float_decode)))
             ++hooked;
         if (std::memcmp(base + 0x60500, kIntCompareHead, sizeof(kIntCompareHead)) == 0 &&
             perf_math::write_jmp5(base + 0x60500, reinterpret_cast<void*>(fast_int_compare)))
             ++hooked;
-        if (std::memcmp(base + 0x609E0, kFloatCompareHead, sizeof(kFloatCompareHead)) == 0 &&
+        if (readers_ok && std::memcmp(base + 0x609E0, kFloatCompareHead, sizeof(kFloatCompareHead)) == 0 &&
             perf_math::write_jmp5(base + 0x609E0, reinterpret_cast<void*>(fast_float_compare)))
             ++hooked;
         if (hooked > 0) {
@@ -902,7 +938,8 @@ inline void install_common() {
         }
     }
 
-    // Wave 5c: Fast zero-assert vstdlib.dll Q_str* / _Q_mem* helpers
+    // Fast zero-assert vstdlib.dll Q_str* helpers. The debug _Q_* exports take (file, line, ...) first
+    // and no shipped game module imports them, so they stay native.
     if (enabled("fast_vstdlib", "1")) {
         HMODULE vstd = GetModuleHandleW(L"vstdlib.dll");
         if (vstd) {
@@ -913,16 +950,11 @@ inline void install_common() {
                 void* target;
             };
             static const VstdHook kVstdHooks[] = {
-                {"_Q_memset",     {0x53, 0x56, 0x8B, 0x74, 0x24, 0x1C}, 6, reinterpret_cast<void*>(fast_q_memset)},
-                {"_Q_memcpy",     {0x53, 0x8B, 0x5C, 0x24, 0x18, 0x56}, 6, reinterpret_cast<void*>(fast_q_memcpy)},
-                {"_Q_memmove",    {0x53, 0x56, 0x8B, 0x74, 0x24, 0x1C}, 6, reinterpret_cast<void*>(fast_q_memcpy)},
-                {"_Q_strcmp",     {0x53, 0x8B, 0x1D, 0x00, 0x00, 0x00}, 3, reinterpret_cast<void*>(fast_q_strcmp)},
-                {"_Q_stricmp",    {0x53, 0x56, 0x8B, 0x74, 0x24, 0x14}, 6, reinterpret_cast<void*>(fast_stricmp_lut)},
                 {"Q_strncmp",     {0x53, 0x8B, 0x1D, 0x00, 0x00, 0x00}, 3, reinterpret_cast<void*>(fast_q_strncmp)},
                 {"Q_strnlwr",     {0x8B, 0x44, 0x24, 0x08, 0x56, 0x8B}, 6, reinterpret_cast<void*>(fast_strnlwr_lut)},
-                {"Q_strncasecmp", {0x53, 0x56, 0x8B, 0x35, 0x00, 0x00}, 4, reinterpret_cast<void*>(fast_strnicmp_lut)},
-                {"Q_strcasecmp",  {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, reinterpret_cast<void*>(fast_stricmp_lut)},
-                {"Q_strnicmp",    {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, reinterpret_cast<void*>(fast_strnicmp_lut)},
+                {"Q_strncasecmp", {0x53, 0x56, 0x8B, 0x35, 0x00, 0x00}, 4, reinterpret_cast<void*>(fast_q_strncasecmp)},
+                {"Q_strcasecmp",  {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, reinterpret_cast<void*>(fast_q_strcasecmp)},
+                {"Q_strnicmp",    {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, reinterpret_cast<void*>(fast_q_strncasecmp)},
             };
             int patched = 0;
             for (const auto& h : kVstdHooks) {
@@ -933,7 +965,7 @@ inline void install_common() {
             }
             if (patched > 0) {
                 char msg[128];
-                sprintf_s(msg, "Fast zero-assert vstdlib string/mem helpers enabled (%d/10 patched).", patched);
+                sprintf_s(msg, "Fast zero-assert vstdlib string helpers enabled (%d/%d patched).", patched, static_cast<int>(_countof(kVstdHooks)));
                 host->log(msg);
             }
         }
@@ -942,7 +974,7 @@ inline void install_common() {
 
 inline void install_screen(HMODULE client_mod) {
     // O(log N) RichText::GetCursorLine (GameUI.dll+0x29250) — independent of client.dll build check
-    if (enabled("fast_console_ui", "1")) {
+    if (enabled("fast_richtext", "1")) {
         HMODULE gameui = GetModuleHandleW(L"GameUI.dll");
         if (gameui && module_range_ok(gameui, 0x29250, 63)) {
             unsigned char* fn = reinterpret_cast<unsigned char*>(gameui) + 0x29250;
@@ -1023,6 +1055,7 @@ inline void install_world() {
     // 3. Strip shipped debug g_ScopeTraceStack from hot trivial CBaseEntity ops in vampire.dll
     if (enabled("fast_entity_flags", "1")) {
         int patched = 0;
+        constexpr std::uintptr_t kFlagsOffset = 0x434; // m_fFlags, as each native body reads or writes it
 
         // 3a. CBaseEntity::GetFlags (vampire.dll+0xB3700) -> mov eax, [ecx+0x434]; ret
         static const unsigned char kScopeEntHead[15] = {
@@ -1032,6 +1065,7 @@ inline void install_world() {
             0x8B, 0x81, 0x34, 0x04, 0x00, 0x00, 0xC3
         };
         if (std::memcmp(base + 0xB3700, kScopeEntHead, sizeof(kScopeEntHead)) == 0 &&
+            u32_at_equals(base + 0xB3700 + 0x6B, kFlagsOffset) && base[0xB3700 + 0x78] == 0xC3 &&
             write_bytes_protected(base + 0xB3700, kFastGetFlags, sizeof(kFastGetFlags)))
             ++patched;
 
@@ -1040,6 +1074,7 @@ inline void install_world() {
             0x8B, 0x44, 0x24, 0x04, 0x09, 0x81, 0x34, 0x04, 0x00, 0x00, 0xC2, 0x04, 0x00
         };
         if (std::memcmp(base + 0xB3580, kScopeEntHead, sizeof(kScopeEntHead)) == 0 &&
+            u32_at_equals(base + 0xB3580 + 0x6F, kFlagsOffset) && u32_at_equals(base + 0xB3580 + 0x78, kFlagsOffset) &&
             base[0xB3580 + 131] == 0xC2 && base[0xB3580 + 132] == 0x04 && base[0xB3580 + 133] == 0x00 &&
             write_bytes_protected(base + 0xB3580, kFastAddFlag, sizeof(kFastAddFlag)))
             ++patched;
@@ -1049,6 +1084,7 @@ inline void install_world() {
             0x8B, 0x44, 0x24, 0x04, 0xF7, 0xD0, 0x21, 0x81, 0x34, 0x04, 0x00, 0x00, 0xC2, 0x04, 0x00
         };
         if (std::memcmp(base + 0xB3640, kScopeEntHead, sizeof(kScopeEntHead)) == 0 &&
+            u32_at_equals(base + 0xB3640 + 0x70, kFlagsOffset) && u32_at_equals(base + 0xB3640 + 0x7A, kFlagsOffset) &&
             base[0xB3640 + 133] == 0xC2 && base[0xB3640 + 134] == 0x04 && base[0xB3640 + 135] == 0x00 &&
             write_bytes_protected(base + 0xB3640, kFastRemoveFlag, sizeof(kFastRemoveFlag)))
             ++patched;

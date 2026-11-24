@@ -45,6 +45,9 @@ struct Session {
     bool level=false,menu=false;
 };
 struct Stack { Tick begin=0,child=0; MetricId metric=transition; };
+// Only the first loads of a session are written to the log. Later ones are still timed, because the
+// speedups that run only inside a timed load (loose_stat, model_names) depend on it.
+constexpr unsigned logged_captures=32;
 // Optional extension: record at capture end, log only alongside the finished capture.
 using SessionObserver=void(*)(const Session&);
 SessionObserver session_finished=nullptr,session_reported=nullptr;
@@ -180,12 +183,12 @@ void finish(const char* status,Tick now,bool abandon=false) {
         m.self=wait>current.wait_scoped?wait-current.wait_scoped:0; m.failed=e.wait_end?0:1;
     }
     if (session_finished) session_finished(current);
-    if (queued<4) queue[queued++]=current; else ++dropped;
-    if (current.kind!=startup) ui={current.id,current.begin,current.endpoints.ready,current.ui_closed,current.ui_closed!=0};
+    if (current.id<=logged_captures) { if (queued<4) queue[queued++]=current; else ++dropped; }
+    if (current.kind!=startup && current.id<=logged_captures) ui={current.id,current.begin,current.endpoints.ready,current.ui_closed,current.ui_closed!=0};
     active=false; schedule();
 }
 void begin(Kind kind,const char* name,Tick now) {
-    if (!enabled_probe || captures>=32) return;
+    if (!enabled_probe) return;
     if (active) finish("interrupted",now,true);
     sampler::disarm();
     current={}; current.id=++captures; current.kind=kind; current.begin=now; current.coverage_start=coverage;
@@ -798,7 +801,7 @@ void install() {
     }
     enabled_probe=true; begin(startup,"BLSE-ready to main menu",clock_now());
     if (!enabled_probe) return; // task queue refused inside begin(); already logged
-    char line[400]; sprintf_s(line,"Loading probe enabled: main-thread summaries, 32 captures, 64 timing scopes, 512 handle slots, loader_wait=%s; startup begins at plugin install (process_age_ms=%llu install_ms=%.3f). No loading behavior changed.",
+    char line[400]; sprintf_s(line,"Loading probe enabled: main-thread summaries of the first 32 captures, 64 timing scopes, 512 handle slots, loader_wait=%s; startup begins at plugin install (process_age_ms=%llu install_ms=%.3f). No loading behavior changed.",
         sampler::wait_flag?(sampler::thread?"sampled":"unsampled"):"not_separated",process_age_ms,ms(install_ticks)); host->log(line);
 }
 } // namespace loading

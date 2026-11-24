@@ -1,4 +1,4 @@
-Engine Fixes and Tweaks 1.2.1
+Engine Fixes and Tweaks 1.3
 for Vampire: The Masquerade - Bloodlines
 ==========================================
 
@@ -33,7 +33,8 @@ INSTALLING
 3. Start the game. Bin\loader\blse\blse.log lists each part as it switches on.
 
 Uninstalling: delete the folder Bin\loader\blse\mods\engine_fixes and the files
-Bin\loader\engine_fixes_intro.vtm, engine_fixes_intro.ini and engine_fixes_intro.log.
+Bin\loader\engine_fixes_intro.vtm, engine_fixes_intro.ini, engine_fixes_intro.log and
+engine_fixes_intro.log.old.
 Updating: copy the new Bin folder over the old one. This replaces the settings files, so
 back them up first if you changed settings. Settings files from 1.0 still work, but they
 have no [Startup] and [Loading] sections, so startup and loading stay at the game's speed.
@@ -75,6 +76,8 @@ FIXES
   new walking direction instead of blending. Turned off.
 - Leg movement in steps: NPC leg movement updated only 10 times per second on screen
   while the rest of the body moved smoothly. It is now blended every frame.
+- Uneven NPC animation: between the game's 10 updates a second, NPC animations could freeze
+  or run ahead for a moment. They now keep moving evenly.
 - NPC posture snapping: NPC posture transitions (standing, seated, low, lying) are now
   blended smoothly.
 - Water clip plane artifacts: fixed-function surfaces (such as the Santa Monica sewer canal
@@ -126,5 +129,6 @@ Bin\loader\engine_fixes_intro.log.
 LICENSE
 -------
 Engine Fixes and Tweaks is free software under the GNU GPL version 3, with an attribution
-term and a permission to combine it with the game. See NOTICE and LICENSE in this folder.
-Source code: https://gitlab.com/bigbannng/engine-fixes
+term and a permission to combine it with the game. See NOTICE.txt and LICENSE.txt in the
+release archive.
+Source code: https://github.com/bbnng/engine-fixes
