@@ -52,11 +52,13 @@ __declspec(naked) void paint_bridge() {
 void log(const char* message) {
     if (!log_path[0]) return;
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
-    char text[768]; const int n=sprintf_s(text,"%.3f ms %s\r\n",frequency.QuadPart?1000.0*static_cast<double>(now.QuadPart-origin.QuadPart)/frequency.QuadPart:0,message);
-    if (n<0) return;
+    char text[768];
+    const int n=_snprintf_s(text,sizeof text,_TRUNCATE,"%.3f ms %s\r\n",frequency.QuadPart?1000.0*static_cast<double>(now.QuadPart-origin.QuadPart)/frequency.QuadPart:0,message);
+    const DWORD length=n<0?static_cast<DWORD>(std::strlen(text)):static_cast<DWORD>(n);
+    if (!length) return;
     AcquireSRWLockExclusive(&log_lock);
     HANDLE file=CreateFileW(log_path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if (file!=INVALID_HANDLE_VALUE) { DWORD written; WriteFile(file,text,static_cast<DWORD>(n),&written,nullptr); CloseHandle(file); }
+    if (file!=INVALID_HANDLE_VALUE) { DWORD written; WriteFile(file,text,length,&written,nullptr); CloseHandle(file); }
     ReleaseSRWLockExclusive(&log_lock);
 }
 bool remove_leaf(wchar_t* path) {
@@ -65,7 +67,8 @@ bool remove_leaf(wchar_t* path) {
 bool paths() {
     wchar_t folder[MAX_PATH]; const DWORD n=GetModuleFileNameW(instance,folder,MAX_PATH);
     if (!n || n>=MAX_PATH || !remove_leaf(folder)) return false;
-    if (swprintf_s(ini_path,L"%s\\engine_fixes_intro.ini",folder)<0 || swprintf_s(log_path,L"%s\\engine_fixes_intro.log",folder)<0) return false;
+    if (std::swprintf(ini_path,MAX_PATH,L"%ls\\engine_fixes_intro.ini",folder)<0 ||
+        std::swprintf(log_path,MAX_PATH,L"%ls\\engine_fixes_intro.log",folder)<0) return false;
     const DWORD exe_length=GetModuleFileNameW(nullptr,root,MAX_PATH);
     if (!exe_length || exe_length>=MAX_PATH || !remove_leaf(root)) return false;
     return true;
@@ -116,7 +119,7 @@ bool mod_directory(wchar_t (&out)[MAX_PATH]) {
         LocalFree(args);
     }
     wchar_t candidate[MAX_PATH],resolved[MAX_PATH],prefix[MAX_PATH];
-    if(swprintf_s(candidate,L"%s\\%s",root,out)<0 || swprintf_s(prefix,L"%s\\",root)<0) return false;
+    if(std::swprintf(candidate,MAX_PATH,L"%ls\\%ls",root,out)<0 || std::swprintf(prefix,MAX_PATH,L"%ls\\",root)<0) return false;
     const DWORD n=GetFullPathNameW(candidate,MAX_PATH,resolved,nullptr);
     if(!n || n>=MAX_PATH || _wcsnicmp(resolved,prefix,wcslen(prefix))) return false;
     return wcscpy_s(out,resolved)==0;
@@ -149,16 +152,16 @@ bool config(Config& cfg) {
     cfg.icon=reinterpret_cast<HICON>(GetClassLongPtrW(game,GCLP_HICON));
     cfg.cover_timeout_ms=3000;
     wchar_t mod[MAX_PATH],media[MAX_PATH]; if(!mod_directory(mod)) return false;
-    if(swprintf_s(media,L"%s\\media",mod)<0) return false;
+    if(std::swprintf(media,MAX_PATH,L"%ls\\media",mod)<0) return false;
     if(GetFileAttributesW(media)!=INVALID_FILE_ATTRIBUTES) wcscpy_s(cfg.media_root,media);
-    else if(swprintf_s(cfg.media_root,L"%s\\Vampire\\media",root)<0) return false;
+    else if(std::swprintf(cfg.media_root,MAX_PATH,L"%ls\\Vampire\\media",root)<0) return false;
     // Loader installs vary: use the same local library already loaded by the
     // game if available, otherwise only its known Bin/root locations.
     auto bink=GetModuleHandleW(L"binkw32.dll");
     if(bink) {const DWORD n=GetModuleFileNameW(bink,cfg.bink_path,MAX_PATH); if(!n || n>=MAX_PATH)return false;}
     else {
-        if(swprintf_s(cfg.bink_path,L"%s\\Bin\\binkw32.dll",root)<0) return false;
-        if(GetFileAttributesW(cfg.bink_path)==INVALID_FILE_ATTRIBUTES && swprintf_s(cfg.bink_path,L"%s\\binkw32.dll",root)<0) return false;
+        if(std::swprintf(cfg.bink_path,MAX_PATH,L"%ls\\Bin\\binkw32.dll",root)<0) return false;
+        if(GetFileAttributesW(cfg.bink_path)==INVALID_FILE_ATTRIBUTES && std::swprintf(cfg.bink_path,MAX_PATH,L"%ls\\binkw32.dll",root)<0) return false;
     }
     return true;
 }
@@ -324,12 +327,15 @@ bool install(HMODULE engine) {
 
 extern "C" __declspec(dllexport) void __cdecl loaded_engine() {
     using namespace intro_loader;
+    // Memory Expansion's process split: the world's process (-memx_server, started with -novid) has no
+    // window, so no intro; returning here also keeps the game's own engine_fixes_intro.log (one per session).
+    if(argument(L"-memx_server"))return;
     if(!ini_path[0] && !paths())return;
     if(!frequency.QuadPart) {
         QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&origin);
         // One log per game session: the previous session's log is kept as engine_fixes_intro.log.old.
         wchar_t old_path[MAX_PATH];
-        if(swprintf_s(old_path,L"%s.old",log_path)>0) MoveFileExW(log_path,old_path,MOVEFILE_REPLACE_EXISTING);
+        if(std::swprintf(old_path,MAX_PATH,L"%ls.old",log_path)>0) MoveFileExW(log_path,old_path,MOVEFILE_REPLACE_EXISTING);
     }
     // Raw QueryPerformanceCounter origin of this log's clock, so its lines can be aligned
     // exactly with engine_fixes' startup report (trace_origin_qpc, same system-wide counter).

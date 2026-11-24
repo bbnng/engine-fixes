@@ -1,3 +1,5 @@
+// Engine Fixes and Tweaks for Vampire: The Masquerade - Bloodlines.
+// Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms: see LICENSE and NOTICE.
 // Restart crash fix ([Fixes] restart_crash) and the startup window ([Startup] startup_trace),
 // inside which the startup speedups run.
 #include "retired_python_heap.h"
@@ -53,7 +55,7 @@ BOOL WINAPI free_module(HMODULE module) {
     SetLastError(error); return result;
 }
 bool finish_retirement() {
-    if (!pending) return false;
+    if (!pending || !python_base || !python_state_valid(python_base)) return false;
     // BLSE emits engine_restart after the loader reset and Python rebind. Retire
     // the reset's hold containers too. Normal gameplay allocations resume only
     // after this callback; no object/type pointer is read by list splicing.

@@ -75,6 +75,21 @@ FIXES
   new walking direction instead of blending. Turned off.
 - Leg movement in steps: NPC leg movement updated only 10 times per second on screen
   while the rest of the body moved smoothly. It is now blended every frame.
+- NPC posture snapping: NPC posture transitions (standing, seated, low, lying) are now
+  blended smoothly.
+- Water clip plane artifacts: fixed-function surfaces (such as the Santa Monica sewer canal
+  floor) are no longer clipped by a double-transformed clip plane during water refraction.
+- Environmental Effects audio echo: enabling Environmental Effects (dsp_on 1) no longer
+  applies the broken master-bus wall-delay (dsp_spatial preset 40) or overflows MDY_Alloc
+  with +INF, while keeping room reverb, underwater, Frenzy and speaker effects intact.
+
+
+PERFORMANCE
+-----------
+On by default in [Performance]; each can be switched off.
+- SSE2 math, memory copy, string compare, timer and angle-matrix optimizations.
+- Vtable-cached monitor camera casts, O(log N) console RichText line lookup, O(1) ConVar
+  lookup cache, and faster delta-bit, property-codec and vstdlib helpers.
 
 
 TWEAKS

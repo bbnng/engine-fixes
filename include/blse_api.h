@@ -1,6 +1,6 @@
 /* Bloodlines Script Extender (BLSE) native plugin API.
  *
- * A plugin is a 32-bit x86 DLL placed in Bin/loader/blse/plugins/ that exports
+ * A plugin is a 32-bit x86 DLL placed in Bin/loader/blse/mods/<mod>/blse/plugins/ that exports
  *
  *     BLSE_EXPORT int BLSE_CALL BLSE_PluginLoad(const BLSE_HostAPI* host);
  *
@@ -431,7 +431,8 @@ typedef int (BLSE_CALL *BLSE_HudHintFn)(void *context, const char *id, const cha
  * through the game's surface, so only after it has drawn a frame. menu_reset_style: the game's own
  * look again for a panel this plugin restyled. menu_set_hint: a hint shown faintly while a text field
  * this plugin added is empty ("" none). A plugin's styles are undone when it is disabled or unloaded.
- * ini_get copies the value of `key` in [section] of Bin\loader\blse\config\<mod>.ini (like
+ * ini_get copies the value of `key` in [section] of <mod>.ini: Bin\loader\blse\mods\<mod>\<mod>.ini when a
+ * mod folder of that name exists (0.6.1), else Bin\loader\blse\config\<mod>.ini (like
  * key_binding; 0 if the file or key is missing); ini_set writes it (NULL removes the key), keeping the
  * rest of the file. mod: 1-63 of A-Z a-z 0-9 _ - . */
 typedef int (BLSE_CALL *BLSE_MenuSetColorsFn)(void *context, const char *screen, const char *path, const char *fg, const char *bg);
@@ -876,7 +877,8 @@ typedef int (BLSE_CALL *BLSE_ItemClassesFn)(void *context, char *buffer, size_t 
  * away (also when first / third person changes), so a plain SetModel does not last. BLSE keeps one
  * player model slot: an outfit (registered by id) or a raw model. While it is filled, BLSE puts its
  * model back whenever the game picks the clan model; scripts' and cutscenes' own models and the
- * Protean beast form pass unchanged. Armor keeps its stats. Main thread for wear/set.
+ * Protean beast form pass unchanged. Armor keeps its stats. All six: main thread only (0 from
+ * other threads), as every host function.
  * add_outfit: registers outfit `id` (1-63 of a-z 0-9 _) from "key=value" lines, the keys of
  *   blse/outfits.txt: name, male, female, male.<clan>, female.<clan>, skin, body.<group>,
  *   material.<original>. The same id again: the later registration wins. 1 ok, 0 refused (the
@@ -896,8 +898,8 @@ typedef int (BLSE_CALL *BLSE_SetPlayerModelFn)(void *context, const char *model,
 typedef int (BLSE_CALL *BLSE_PlayerModelFn)(void *context, char *buffer, size_t capacity, size_t *size);
 /* Animation (BLSE b0.5.49; see docs/plugins/world-and-data.md). Main thread, while a level runs.
  * list_sequences: the entity's sequences in the game's numbering (its model's and the animation
- * models it includes), "index	name	activity	loops	duration
-" each (activity "" if none,
+ * models it includes), "index<TAB>name<TAB>activity<TAB>loops<TAB>duration<LF>"
+ * each (activity "" if none,
  * loops 1 or 0, duration in seconds). lookup_sequence: a sequence by name (case ignored) or by its
  * number in decimal; -1 if the model has none.
  * play_animation: plays it on the entity, rate 0..16 (1 normal). An NPC keeps it against its own AI
@@ -941,6 +943,65 @@ typedef int (BLSE_CALL *BLSE_SetAnimationRuleFn)(void *context, const char *who,
 typedef int (BLSE_CALL *BLSE_AddAnimationFilterFn)(void *context, BLSE_AnimationFilterFn filter, void *user);
 typedef int (BLSE_CALL *BLSE_ActivityIdFn)(void *context, const char *name);
 typedef int (BLSE_CALL *BLSE_ActivityNameFn)(void *context, int activity, char *buffer, size_t capacity, size_t *size);
+/* More places the game picks a sequence (C18b; see docs/python/animation.md). set_animation_rule's
+ * rules apply at every one of them, by activity: an NPC's activity change (BLSE_ANIM_PICK_ACTIVITY,
+ * the only kind before C18b), a gesture played over the body (GESTURE, CBaseAnimatingOverlay::
+ * AddGesture), the melee attack a character picks (MELEE, ChooseMeleeAttackSequence: the NPCs' and
+ * the player's), the sequences of a knockback flight that follow the one before it (KNOCKBACK:
+ * ACT_KNOCKBACK_FLYING_IDLE, _LAND, _WALL_HIT, _WALL_FALL, _WALL_LAND), and the player's own
+ * movement and weapon-layer animations (PLAYER; third person: the player's model is not drawn in
+ * first person, whose arms are the weapon's view model). The player is matched only by its
+ * classname "player", its name or its handle, never by "*" or "model:".
+ * VIEWMODEL (C36): first person, the weapon's view model and the clan hands, picked when a weapon
+ * sends an animation (draw, idle, fire, reload, swing, holster, ...). Only rules whose who is
+ * "viewmodel" (any weapon), "viewmodel:<text>" (weapon classname, or text in its model path),
+ * "hands" or "hands:<text>" (text in the hands' model path) apply there; those words keep their old
+ * meaning (a classname or name) at kinds 0-4. Filter `entity`: the weapon (its sequence numbers are
+ * its v_ model's) or the hands view model (classname "viewmodel"). A view model's sequence must be
+ * below 2048 (11 network bits). Hooked only for such a rule, a filter with this bit, or Python's
+ * report_viewmodel_picks; its picks are published as BLSE_MSG_ANIM_CHOSEN only then, never just
+ * because someone listens.
+ * add_animation_filter_ex: like add_animation_filter, at the kinds in `kinds` (BLSE_ANIM_PICK_*
+ * bits; add_animation_filter is BLSE_ANIM_PICK_ACTIVITY only); `kind` tells the filter which one
+ * (0 activity, 1 gesture, 2 melee, 3 knockback, 4 player, 5 viewmodel). Returning -1 or an invalid number keeps
+ * the choice. NPC melee filters require an attack the game can make. Player weapon choices
+ * (including swings at air) and by-name combo follow-ups are also kind 2; combo activity is
+ * ACT_MELEE_ATTACK and translated is the weapon activity. add_animation_filter_ex and all six kinds
+ * are new in 0.7 (check BLSE_HOST_HAS(host, add_animation_filter_ex)). */
+#define BLSE_ANIM_PICK_ACTIVITY 0x01u
+#define BLSE_ANIM_PICK_GESTURE 0x02u
+#define BLSE_ANIM_PICK_MELEE 0x04u
+#define BLSE_ANIM_PICK_KNOCKBACK 0x08u
+#define BLSE_ANIM_PICK_PLAYER 0x10u
+#define BLSE_ANIM_PICK_VIEWMODEL 0x20u /* C36 */
+#define BLSE_ANIM_PICK_ALL 0x3fu
+typedef int (BLSE_CALL *BLSE_AnimationFilterExFn)(void *user, uint32_t entity, int activity, int translated, int sequence, int kind);
+typedef int (BLSE_CALL *BLSE_AddAnimationFilterExFn)(void *context, BLSE_AnimationFilterExFn filter, void *user, unsigned kinds);
+/* Model animation events (C35; docs/python/animation.md#model-animation-events). A model's sequences
+ * carry events at points of their cycle: NPC footsteps (2050-2053), script events (1000-1010:
+ * scripted sequences' outputs, sounds), weapon events (3000-3999), VTMB's own (4005 a sequence, 4006/4007, 4020, 4100-4102
+ * attached models, 2070/2071 physics chains). The server's events (numbers below 5000) of an
+ * entity's sequence and its gesture layers pass BLSE before the game handles them; client events
+ * (5000 and up: client sounds, muzzle flashes, the client's effects) never reach the server.
+ * set_anim_event_rule: when an entity matching `who` (as animation rules, but "*" is every entity
+ * with a model, the player included) fires `event`: action "block" (the game does not handle it),
+ * "<number>" (handled as that event instead), "<number> <options>" (and with these options, at most
+ * 63 characters), "* <options>" (the same event with these options); NULL or "" removes the rule.
+ * add_anim_event_filter: `filter` sees every event after the rules (changes to event->event and
+ * event->options are used; return 0 to block it). Filters and subscribers run inside the game's
+ * think: keep them fast, never start animations or spawn entities there. Event:
+ * BLSE_MSG_ANIM_EVENT. Hooks are installed with the first rule, filter or subscriber. */
+typedef struct BLSE_AnimEvent {
+    uint32_t struct_size;   /* sizeof(BLSE_AnimEvent), set by BLSE */
+    int event;              /* the event's number; a filter may change it */
+    float cycle;            /* where in the sequence it fires, 0..1 */
+    int sequence;           /* the sequence that fires it */
+    int layer;              /* -1 the entity's sequence, 0..3 a gesture layer */
+    char options[64];       /* its options text; a filter may change it (NUL-terminated) */
+} BLSE_AnimEvent;
+typedef int (BLSE_CALL *BLSE_AnimEventFilterFn)(void *user, uint32_t entity, BLSE_AnimEvent *event);
+typedef int (BLSE_CALL *BLSE_SetAnimEventRuleFn)(void *context, const char *who, int event, const char *action);
+typedef int (BLSE_CALL *BLSE_AddAnimEventFilterFn)(void *context, BLSE_AnimEventFilterFn filter, void *user);
 typedef int (BLSE_CALL *BLSE_PluginVersionFn)(void *context, const char *name, char *buffer, size_t capacity, size_t *size);
 typedef int (BLSE_CALL *BLSE_ListPluginsFn)(void *context, char *buffer, size_t capacity, size_t *size);
 typedef int (BLSE_CALL *BLSE_SaveGetVersionedFn)(void *context, const char *key, void *buffer, size_t capacity, size_t *size, uint32_t *version);
@@ -967,6 +1028,253 @@ typedef int (BLSE_CALL *BLSE_HudLineFn)(void *context, const char *id, float x0,
 typedef int (BLSE_CALL *BLSE_HudPolygonFn)(void *context, const char *id, const float *xy, size_t count, uint32_t color, uint32_t border, int strip);
 typedef int (BLSE_CALL *BLSE_HudRotateFn)(void *context, const char *id, float degrees);
 typedef int (BLSE_CALL *BLSE_HudFontFn)(void *context, const char *id, const char *face, int weight, int flags);
+
+/* 3D scenes in the HUD overlay (phase 2a; docs/plugins/scenes.md). A scene is a HUD element (the
+ * same ids, drawing order, hud_in_menus, hud_clickable and hud_remove as the other elements) in
+ * which game models (.mdl) are drawn with the scene's own camera and lights, over the world, every
+ * rendered frame, without lag. Models are drawn client-side only: nothing is spawned or saved.
+ * scene_set: the rectangle (fractions of the screen); makes the scene or moves it. 16 scenes in all.
+ * scene_camera: position and angles (pitch, yaw, roll; Source axes, +X forward at yaw 0) in the
+ *   scene's own space; position NULL = framed from all visible models (the default).
+ * scene_projection: fov (horizontal, 1..170 degrees, default 40); ortho > 0 = orthographic, the view
+ *   height in units; znear/zfar (default 1 and 4096).
+ * scene_light: point light n (0..3) at `position` (NULL removes it), color 0xRRGGBBAA (alpha unused),
+ *   range (0 = automatic), intensity 0..16 (1 normal). The first light set replaces the automatic one.
+ * scene_color: BLSE_SCENE_AMBIENT (light from every side; black = none), BLSE_SCENE_CLEAR (fill the
+ *   rectangle first), BLSE_SCENE_CLEAR_OFF (show what is behind, the default), BLSE_SCENE_TINT
+ *   (colour modulation, alpha = opacity).
+ * scene_model: adds or changes object `object` (1-63 characters; 16 a scene). model "models/....mdl"
+ *   (NULL keeps the current one); origin/angles NULL keep theirs; scale 0.01..100 (<= 0 keeps it).
+ *   The file is checked and loaded at once: 0 if it is missing or not a studio model (logged).
+ * scene_animate: sequence by name or decimal number (NULL keeps it), rate -16..16 (0 = posed), cycle
+ *   0..1 (< 0 keeps it; a new sequence starts at 0), mode BLSE_SCENE_MODEL (the sequence's own
+ *   looping), BLSE_SCENE_LOOP or BLSE_SCENE_HOLD (stop at the end). Animation runs in real time
+ *   while the scene is drawn. scene_cycle sets the cycle (0..1).
+ * scene_state: the object's state (BLSE_SceneState, struct_size set by the caller).
+ * scene_skin: skin (-1 keeps) and the raw body value (-1 keeps); scene_body_group sets one body group
+ *   by name or decimal number.
+ * scene_visible: object NULL = the whole scene. scene_remove: object NULL = the whole scene.
+ * scene_sequences: a model's sequences, "index<TAB>name<TAB>duration<TAB>loops<LF>" each.
+ * scene_available: 1 if scenes work on this game build; else 0 and the reason (copied like other
+ *   text). All return 1 on success, 0 on failure. Main thread only. A plugin's scenes end with it. */
+enum { BLSE_SCENE_AMBIENT = 0, BLSE_SCENE_CLEAR = 1, BLSE_SCENE_TINT = 2, BLSE_SCENE_CLEAR_OFF = 3 };
+enum { BLSE_SCENE_MODEL = 0, BLSE_SCENE_LOOP = 1, BLSE_SCENE_HOLD = 2 };
+typedef struct BLSE_SceneState {
+    uint32_t struct_size;  /* sizeof(BLSE_SceneState) */
+    int sequence;          /* number */
+    float cycle;           /* 0..1 */
+    float rate;
+    int mode;              /* BLSE_SCENE_MODEL, _LOOP, _HOLD */
+    int finished;          /* a held sequence reached its end */
+    int skin, body;
+    float scale;
+    int visible;
+    int loaded;            /* the model is loaded and its renderable made */
+    char name[64];         /* the sequence's name ("" if unknown) */
+    char model[128];
+} BLSE_SceneState;
+typedef int (BLSE_CALL *BLSE_SceneSetFn)(void *context, const char *id, float x, float y, float w, float h);
+typedef int (BLSE_CALL *BLSE_SceneCameraFn)(void *context, const char *id, const float *position, const float *angles);
+typedef int (BLSE_CALL *BLSE_SceneProjectionFn)(void *context, const char *id, float fov, float ortho, float znear, float zfar);
+typedef int (BLSE_CALL *BLSE_SceneLightFn)(void *context, const char *id, int n, const float *position, uint32_t color, float range, float intensity);
+typedef int (BLSE_CALL *BLSE_SceneColorFn)(void *context, const char *id, int what, uint32_t color);
+typedef int (BLSE_CALL *BLSE_SceneModelFn)(void *context, const char *id, const char *object, const char *model, const float *origin, const float *angles, float scale);
+typedef int (BLSE_CALL *BLSE_SceneAnimateFn)(void *context, const char *id, const char *object, const char *sequence, float rate, float cycle, int mode);
+typedef int (BLSE_CALL *BLSE_SceneCycleFn)(void *context, const char *id, const char *object, float cycle);
+typedef int (BLSE_CALL *BLSE_SceneStateFn)(void *context, const char *id, const char *object, BLSE_SceneState *out);
+typedef int (BLSE_CALL *BLSE_SceneSkinFn)(void *context, const char *id, const char *object, int skin, int body);
+typedef int (BLSE_CALL *BLSE_SceneBodyGroupFn)(void *context, const char *id, const char *object, const char *group, int value);
+typedef int (BLSE_CALL *BLSE_SceneVisibleFn)(void *context, const char *id, const char *object, int visible);
+typedef int (BLSE_CALL *BLSE_SceneRemoveFn)(void *context, const char *id, const char *object);
+typedef int (BLSE_CALL *BLSE_SceneSequencesFn)(void *context, const char *model, char *buffer, size_t capacity, size_t *size);
+typedef int (BLSE_CALL *BLSE_SceneAvailableFn)(void *context, char *buffer, size_t capacity, size_t *size);
+
+/* Light from the world (docs/plugins/scenes.md, "Light from the world"). Optional: a scene is lit like
+ * a spot in the level, by the engine's own lighting there (the light a model standing there gets: an
+ * ambient colour from each of 6 sides and the strongest nearby lights), sampled a few times a second
+ * and turned so light from the player's left lights the scene from the camera's left.
+ * scene_world_light: source BLSE_SCENE_WORLD_OFF (the default: only the scene's own lights),
+ *   _PLAYER (where the player stands), _ENTITY (`entity`: index or handle, followed as it moves) or
+ *   _POINT (`point`: world coordinates). mix 0..1: the world's share (1 = only the world; the
+ *   scene's own lights, automatic light and ambient get 1 - mix). scale 0..16: brightness of the
+ *   world's part (1 = as bright as a model standing there). rate 1..60: samples a second (10 is plenty). turn
+ *   BLSE_SCENE_TURN_VIEW (directions follow the player's view, the default) or _WORLD (scene axes
+ *   are the world's). 0 if the scene does not exist or a value is out of range.
+ * scene_world_light_state: the settings and the last sample (BLSE_SceneWorldLightState,
+ *   struct_size set by the caller). `active` 0 means the scene is lit by its own lights only (no
+ *   level, the entity is gone, or this game build's lighting query was not recognized); `status`
+ *   says why. `brightness` is about 0 (dark) to 1 (fully lit white), more under strong lights. */
+enum { BLSE_SCENE_WORLD_OFF = 0, BLSE_SCENE_WORLD_PLAYER = 1, BLSE_SCENE_WORLD_ENTITY = 2, BLSE_SCENE_WORLD_POINT = 3 };
+enum { BLSE_SCENE_TURN_VIEW = 0, BLSE_SCENE_TURN_WORLD = 1 };
+typedef struct BLSE_SceneWorldLightState {
+    uint32_t struct_size;  /* sizeof(BLSE_SceneWorldLightState) */
+    int source;            /* BLSE_SCENE_WORLD_... */
+    uint32_t entity;       /* _ENTITY */
+    float mix, scale, rate;
+    int turn;              /* BLSE_SCENE_TURN_... */
+    int active;            /* a sample lights the scene */
+    float cube[6][3];      /* the ambient light drawn from +X, -X, +Y, -Y, +Z, -Z (world axes, linear RGB) */
+    int lights;            /* the nearby lights in the sample (the engine uses the 2 strongest by default) */
+    float brightness;
+    float point[3];        /* the world point sampled last */
+    char status[128];      /* "" when active, else why not */
+} BLSE_SceneWorldLightState;
+typedef int (BLSE_CALL *BLSE_SceneWorldLightFn)(void *context, const char *id, int source, uint32_t entity, const float *point, float mix, float scale,
+                                                float rate, int turn);
+typedef int (BLSE_CALL *BLSE_SceneWorldLightStateFn)(void *context, const char *id, BLSE_SceneWorldLightState *out);
+/* Particle effects and screen overlays (docs/plugins/effects.md).
+ * An effect is a particle definition (particles/<name>.txt) shown at a place under an id of 1-63
+ * characters, scoped to the plugin (like HUD ids). Places (BLSE_FxPlace, struct_size set by the caller):
+ *   BLSE_FX_WORLD   position and angles in the level. A client-side emitter (the game's own pool); not
+ *                   saved; ends with the level.
+ *   BLSE_FX_ENTITY  on an entity (index or handle): attach BLSE_FX_ORIGIN (follows its origin),
+ *                   _BONE (name = bone), _ATTACHMENT (name = model attachment), _HITBOX (name = a bone,
+ *                   NULL = all), _TREE, _TREE_COLORS (the whole skeleton). Follows the bones; ends with
+ *                   the level or the entity.
+ *   BLSE_FX_SCREEN  on the screen: screen BLSE_FX_CENTER, _BORDER, _BOTTOM, _RANDOM. Made through the
+ *                   player's PlayHUDParticle input (first person; third_person also draws it in third
+ *                   person). Kept across level changes and loads (BLSE makes it again), saved switched off.
+ * Options (BLSE_FxOptions, NULL = defaults): `set` says which of rate (0..16), size (0..4), alpha (0..1)
+ * and rgb (0xRRGGBB colour scale) to apply; third_person (screen); life in seconds (0 = until stopped).
+ * fx_start: makes or replaces the effect; 1 when made or waiting for the game to catch up (a definition
+ *   precached this frame, an entity spawned this frame: up to 2 seconds; a screen effect while no level
+ *   runs: at the next level start); 0 with the reason in blse.log (no level, no definition file, no
+ *   bone, the precache table nearly full, 64 world/entity or 16 screen effects in all).
+ * fx_move: a world effect moves; any other place starts it again there. fx_options: replaces the options.
+ * fx_stop: now 0 stops spawning (the particles fade), 1 removes at once. fx_list: "id\n" per effect, then
+ *   "overlay:id\n" per screen overlay.
+ * precache_particle: puts a definition into the game's precache table (256 entries; BLSE leaves 16).
+ * view_model: the handle of the player's view model 0 (the hands) or 1, 0 when none.
+ * screen_effect: a full-screen material ("effects/redvision", "mymod/overlay"; materials/<name>.vmt)
+ *   drawn the way the Disciplines' overlays are (CViewRender::ScreenFeedbackOverlay), after the world and
+ *   the view model, under the HUD, at full resolution. alpha 0..1; blur: radius 0..0.05 in texture
+ *   coordinates (materials with $blur; the game uses 0.002..0.005); expand 0..1 (texture coordinates
+ *   pulled in: a zoom); rgb colour; frame: what a material reading the screen sees: BLSE_FX_FRAME_FULL
+ *   (this frame at full size, as red vision), _DELAY (the game's 512x512 delayed copy, as Obfuscate and
+ *   Auspex), _NONE (no copy); order -100..100 (lower draws first). material NULL or ""
+ *   removes it. 16 in all, every mod's drawn. Kept across levels, loads and engine restarts; not saved.
+ * screen_effect_alpha: changes only the alpha (fades every frame without a material lookup).
+ * fx_available: kind BLSE_FX_WORLD/_ENTITY/_SCREEN, or BLSE_FX_OVERLAY for screen_effect: 1 if it works
+ *   on this game build; else 0 and the reason (copied like other text).
+ * All return 1 on success, 0 on failure. Main thread only. A plugin's effects end with it. */
+enum { BLSE_FX_WORLD = 0, BLSE_FX_ENTITY = 1, BLSE_FX_SCREEN = 2, BLSE_FX_OVERLAY = 3 };
+enum { BLSE_FX_ORIGIN = 0, BLSE_FX_BONE = 1, BLSE_FX_ATTACHMENT = 2, BLSE_FX_HITBOX = 3, BLSE_FX_TREE = 4, BLSE_FX_TREE_COLORS = 5 };
+enum { BLSE_FX_CENTER = 0, BLSE_FX_BORDER = 1, BLSE_FX_BOTTOM = 2, BLSE_FX_RANDOM = 3 };
+enum { BLSE_FX_SET_RATE = 1, BLSE_FX_SET_SIZE = 2, BLSE_FX_SET_ALPHA = 4, BLSE_FX_SET_COLOR = 8 };
+typedef struct BLSE_FxPlace {
+    uint32_t struct_size;  /* sizeof(BLSE_FxPlace) */
+    int kind;              /* BLSE_FX_WORLD, _ENTITY, _SCREEN */
+    float position[3];     /* world */
+    float angles[3];       /* world: pitch, yaw, roll */
+    uint32_t entity;       /* entity: index or handle */
+    int attach;            /* entity: BLSE_FX_ORIGIN .. BLSE_FX_TREE_COLORS */
+    const char *name;      /* entity: bone or attachment name (NULL for none) */
+    int screen;            /* screen: BLSE_FX_CENTER .. BLSE_FX_RANDOM */
+} BLSE_FxPlace;
+typedef struct BLSE_FxOptions {
+    uint32_t struct_size;  /* sizeof(BLSE_FxOptions) */
+    uint32_t set;          /* BLSE_FX_SET_* bits: which of the next four apply */
+    float rate, size, alpha;
+    uint32_t rgb;          /* 0xRRGGBB */
+    int third_person;      /* screen: also in third person */
+    float life;            /* seconds; 0 = until stopped */
+    int until_death;       /* entity: 1 = stops when the entity dies (0: follows the body, also a corpse) */
+} BLSE_FxOptions;
+typedef int (BLSE_CALL *BLSE_FxStartFn)(void *context, const char *id, const char *definition, const BLSE_FxPlace *place, const BLSE_FxOptions *options);
+typedef int (BLSE_CALL *BLSE_FxMoveFn)(void *context, const char *id, const BLSE_FxPlace *place);
+typedef int (BLSE_CALL *BLSE_FxOptionsFn)(void *context, const char *id, const BLSE_FxOptions *options);
+typedef int (BLSE_CALL *BLSE_FxStopFn)(void *context, const char *id, int now);
+typedef int (BLSE_CALL *BLSE_FxListFn)(void *context, char *buffer, size_t capacity, size_t *size);
+typedef int (BLSE_CALL *BLSE_PrecacheParticleFn)(void *context, const char *definition);
+typedef uint32_t (BLSE_CALL *BLSE_ViewModelFn)(void *context, int index);
+enum { BLSE_FX_FRAME_NONE = 0, BLSE_FX_FRAME_FULL = 1, BLSE_FX_FRAME_DELAY = 2 };
+typedef int (BLSE_CALL *BLSE_ScreenEffectFn)(void *context, const char *id, const char *material, float alpha, float blur, float expand, uint32_t rgb, int frame, int order);
+typedef int (BLSE_CALL *BLSE_ScreenEffectAlphaFn)(void *context, const char *id, float alpha);
+typedef int (BLSE_CALL *BLSE_FxAvailableFn)(void *context, int kind, char *buffer, size_t capacity, size_t *size);
+/* Skill attempts: lockpicking taken over by mods (0.7; docs/plugins/world-and-data.md). Every lock
+ * (prop_doorknob, prop_padlock, item_container_lock, prop_doorknob_electronic) is a skill entity. While a
+ * plugin takes a class, the game still runs its own checks when the player uses a locked one (key,
+ * requires key, "need lockpicks") and its start (the Intrusion alert, OnSkillAttemptBegin), but not its
+ * timed attempt: BLSE publishes BLSE_MSG_SKILL_ATTEMPT and the plugin ends the attempt with
+ * skill_result. Doors the player has the key for, and unlocked ones, are never taken. Main thread only.
+ * take_skill_attempts: `classes` comma-separated class names ("prop_doorknob, prop_padlock"), "*" for
+ *   every skill entity, NULL or "" to stop. Replaces the plugin's earlier call. The first owner (in the
+ *   order they took) taking a class gets its attempts. 1 ok, 0 refused (logged), -1 not available.
+ * skill_info: the lock's state; 1, 0 if `entity` (index or handle) is not a skill entity, -1 not available.
+ * skill_result: "success" (unlocked; OnSkillSuccess), "fail" (OnSkillFail), "botch" (OnSkillBotch): the
+ *   game's own handler with the player, and the lock's last roll set to 3 / 1 / 0; or "cancel" (no
+ *   result). Each ends the player's attempt on that entity if there is one. 1 / 0 (logged) / -1.
+ * hud_cursor_pointer: while this plugin has cursor mode on, shown 0 hides the mouse pointer BLSE draws
+ *   (the mouse still moves freely and clicks are still reported). The pointer is drawn while any owner in
+ *   cursor mode wants it. 1, or 0 if cursor mode is not available. */
+typedef struct BLSE_SkillInfo {
+    uint32_t handle;
+    int difficulty;     /* the lock's difficulty (the maps use 0-10) */
+    int skill;          /* the lock's skill type (1 for every lock in the game's maps) */
+    int roll;           /* the last roll: below 3 = locked */
+    int attempts;
+    int locked, requires_key, has_key;  /* has_key: the player carries the key named in `key` */
+    int active;         /* the player's current attempt is on this entity */
+    int taken;          /* ... and a mod holds it */
+    char classname[64];
+    char name[128];
+    char model[128];
+    char key[128];
+    char taken_by[64];  /* "python", a plugin's name, or "" */
+} BLSE_SkillInfo;
+typedef int (BLSE_CALL *BLSE_TakeSkillAttemptsFn)(void *context, const char *classes);
+typedef int (BLSE_CALL *BLSE_SkillInfoFn)(void *context, uint32_t entity, BLSE_SkillInfo *out);
+typedef int (BLSE_CALL *BLSE_SkillResultFn)(void *context, uint32_t entity, const char *result);
+typedef int (BLSE_CALL *BLSE_HudCursorPointerFn)(void *context, int shown);
+
+/* Game speed (0.7): slow motion and a near stop, shared by mods. BLSE sets the engine's
+ * host_timescale: the whole world slows (thinking, physics, animation, timers, NPCs); the HUD overlay,
+ * BLSE scenes and sounds keep real speed, and blse.game_frame keeps coming.
+ * time_scale: asks for a speed, 0.001 (nearly stopped; the engine ignores 0) to 10; 1.0 withdraws the
+ *   request. The slowest request of all mods applies; when none is left, the value from before the first
+ *   one is set again. A request ends by itself when the plugin unloads or crashes, and at every level
+ *   end (also loading a save). Main thread only. 1 ok, 0 refused (logged).
+ * time_scale_current: the speed the game runs at now (1.0 if it cannot be read). */
+typedef int (BLSE_CALL *BLSE_TimeScaleFn)(void *context, float scale);
+typedef float (BLSE_CALL *BLSE_TimeScaleCurrentFn)(void *context);
+
+/* Camera hold in first person, and hiding the game's HUD (0.7; for full-screen interfaces such as
+ * a lock screen, photo modes and cut scenes).
+ * camera_override_ex: camera_override with flags. BLSE_CAMERA_KEEP_MODE: a placed position does not switch
+ *   to third person; the view mode stays as the player has it (in first person no character is drawn,
+ *   and the hands and weapon are drawn at the placed view). flags 0 = camera_override. Both NULL: the
+ *   game's view again (only if this plugin placed it).
+ * hide_game_hud: 1 hides the game's own HUD (health, blood, stealth, Disciplines, the use icon, info texts,
+ *   timers, the subtitles; not the dialogue, signs, credits or BLSE's HUD overlay, scenes and effects),
+ *   at once, with no fade; 0 withdraws this plugin's request. The HUD comes back when no mod asks any
+ *   more; requests end when the plugin unloads or crashes, and at every level end (also loading a save).
+ *   Hiding needs a running level. Main thread only. 1 ok, 0 refused (logged).
+ * game_hud_hidden: 1 if some mod has the game's HUD hidden. */
+enum { BLSE_CAMERA_KEEP_MODE = 1 };
+typedef int (BLSE_CALL *BLSE_CameraOverrideExFn)(void *context, const float *origin, const float *angles, int flags);
+typedef int (BLSE_CALL *BLSE_HideGameHudFn)(void *context, int hide);
+typedef int (BLSE_CALL *BLSE_GameHudHiddenFn)(void *context);
+
+/* Memory Expansion's process split ([Split] enabled = 1 in memory_expansion.ini): the game's world
+ * (vampire.dll: entities, AI, Python, skill attempts, saves) runs in a second Vampire.exe with no window,
+ * the game window (client.dll: drawing, the HUD overlay, 3D scenes, keys, mouse, sounds, the camera) in
+ * the first. Each loads BLSE and its plugins. A plugin that needs both sides runs its world part where
+ * the world is and its screen part where the window is, and the two talk with split_send.
+ * split_role: BLSE_SPLIT_NONE (one process: single player, everything here), BLSE_SPLIT_WORLD (this
+ *   process has the world and no window), BLSE_SPLIT_SCREEN (this process has the window; the world is
+ *   in the other process while split_linked says so: without it, e.g. when the world process could not
+ *   start, this process runs its own world as in single player).
+ * split_linked: 1 while the other process is connected.
+ * split_send: publishes `topic` with the payload (copied) to the subscribers in the OTHER process, on its
+ *   main thread at its next frame, in the order sent. Topics starting with "blse." are reserved. 1 sent,
+ *   0 not linked (or a bad topic / more than 1 MB). In the screen process, while it shows a level of the
+ *   world process, blse.level_init / blse.level_shutdown follow client.dll's level and blse.game_frame
+ *   comes every painted frame; world events (game_loaded, new_game, before_save, skill attempts, entity
+ *   events) stay in the world process. */
+enum { BLSE_SPLIT_NONE = 0, BLSE_SPLIT_WORLD = 1, BLSE_SPLIT_SCREEN = 2 };
+typedef int (BLSE_CALL *BLSE_SplitRoleFn)(void *context);
+typedef int (BLSE_CALL *BLSE_SplitLinkedFn)(void *context);
+typedef int (BLSE_CALL *BLSE_SplitSendFn)(void *context, const char *topic, const void *payload, size_t size);
 
 typedef struct BLSE_HostAPI {
     uint32_t struct_size;
@@ -1233,6 +1541,62 @@ typedef struct BLSE_HostAPI {
     BLSE_ListOutfitsFn list_outfits;
     BLSE_SetPlayerModelFn set_player_model;
     BLSE_PlayerModelFn player_model;
+    /* --- how the build was recognized (0.6.3) --- */
+    /* NULL when build_profile is NULL. "" when the game DLLs are files BLSE knows. Otherwise the DLLs
+     * a patch (such as a newer Unofficial Patch) edited in place, comma-separated, e.g. "vampire.dll":
+     * the same build, so addresses are the profile's, but some code differs. Compare a function's
+     * bytes before you hook, call or change it (hook_function does this for you). */
+    const char *build_edited;
+    /* --- more animation choices (C18b) and model animation events (C35) --- */
+    BLSE_AddAnimationFilterExFn add_animation_filter_ex;
+    BLSE_SetAnimEventRuleFn set_anim_event_rule;
+    BLSE_AddAnimEventFilterFn add_anim_event_filter;
+    /* --- 3D scenes in the HUD overlay (phase 2a) --- */
+    BLSE_SceneSetFn scene_set;
+    BLSE_SceneCameraFn scene_camera;
+    BLSE_SceneProjectionFn scene_projection;
+    BLSE_SceneLightFn scene_light;
+    BLSE_SceneColorFn scene_color;
+    BLSE_SceneModelFn scene_model;
+    BLSE_SceneAnimateFn scene_animate;
+    BLSE_SceneCycleFn scene_cycle;
+    BLSE_SceneStateFn scene_state;
+    BLSE_SceneSkinFn scene_skin;
+    BLSE_SceneBodyGroupFn scene_body_group;
+    BLSE_SceneVisibleFn scene_visible;
+    BLSE_SceneRemoveFn scene_remove;
+    BLSE_SceneSequencesFn scene_sequences;
+    BLSE_SceneAvailableFn scene_available;
+    /* --- 3D scenes: light from the world --- */
+    BLSE_SceneWorldLightFn scene_world_light;
+    BLSE_SceneWorldLightStateFn scene_world_light_state;
+    /* --- particle effects and screen overlays --- */
+    BLSE_FxStartFn fx_start;
+    BLSE_FxMoveFn fx_move;
+    BLSE_FxOptionsFn fx_options;
+    BLSE_FxStopFn fx_stop;
+    BLSE_FxListFn fx_list;
+    BLSE_PrecacheParticleFn precache_particle;
+    BLSE_ViewModelFn view_model;
+    BLSE_ScreenEffectFn screen_effect;
+    BLSE_ScreenEffectAlphaFn screen_effect_alpha;
+    BLSE_FxAvailableFn fx_available;
+    /* --- skill attempts: lockpicking taken over by mods (0.7) --- */
+    BLSE_TakeSkillAttemptsFn take_skill_attempts;
+    BLSE_SkillInfoFn skill_info;
+    BLSE_SkillResultFn skill_result;
+    BLSE_HudCursorPointerFn hud_cursor_pointer;
+    /* --- game speed (0.7) --- */
+    BLSE_TimeScaleFn time_scale;
+    BLSE_TimeScaleCurrentFn time_scale_current;
+    /* --- camera hold in first person, hiding the game's HUD (0.7) --- */
+    BLSE_CameraOverrideExFn camera_override_ex;
+    BLSE_HideGameHudFn hide_game_hud;
+    BLSE_GameHudHiddenFn game_hud_hidden;
+    /* --- Memory Expansion's process split (0.7.1) --- */
+    BLSE_SplitRoleFn split_role;
+    BLSE_SplitLinkedFn split_linked;
+    BLSE_SplitSendFn split_send;
 } BLSE_HostAPI;
 
 typedef int (BLSE_CALL *BLSE_PluginLoadFn)(const BLSE_HostAPI *host);
@@ -1324,12 +1688,13 @@ typedef struct BLSE_PluginInfo {
  * original damage, damage type bits. Native subscribers are called inside game code; Python
  * subscribers at the next safe point. Only on recognized game builds. */
 #define BLSE_MSG_DAMAGE "blse.damage"
-/* Stat change (BLSE b0.5.4), published after a character stat's base value changed:
+/* Stat change (BLSE b0.5.5), published after a character stat's base value changed:
  * blood pool, health, humanity, ... Payload: eight NUL-separated text fields: owner entity index,
  * stat index, old value, new value, the game method that changed it (IncBase, DecBase, AddBase,
  * SubBase, SetBase), the cause (the game functions that led to the change, innermost first,
  * separated by " < "), the entity name the innermost of them reported, and the stat's name from
- * the game's stat definitions (vdata/system/stats.txt, e.g. "BloodPool", "Health", "Humanity").
+ * the game's stat definitions (vdata/system/stats.txt), in lower case as the game stores it:
+ * "bloodpool", "health", "humanity", ...
  * Filling a new character's stats with their defaults is not reported.
  * Native subscribers are called inside game code; Python subscribers at the next safe point.
  * Only on recognized game builds. */
@@ -1382,7 +1747,8 @@ typedef struct BLSE_PluginInfo {
 #define BLSE_MSG_MENU_OPENED "blse.menu_opened"
 #define BLSE_MSG_MENU_CLOSED "blse.menu_closed"
 /* A button a mod added (menu_add_button, BLSE b0.5.32) was clicked. Payload: the screen's name and
- * the button's path, NUL-separated. Delivered right away. */
+ * the button's path, NUL-separated. Clicks are queued and published at the next menu tick (the
+ * next painted frame), not inside the click. */
 #define BLSE_MSG_MENU_BUTTON "blse.menu_button"
 /* A button lit up under the pointer (BLSE b0.5.49): any button of an open screen or a mod's
  * window, the game's own included. Payload: the screen's name and the button's path (as
@@ -1431,8 +1797,9 @@ typedef struct BLSE_PluginInfo {
 /* Save-game data (BLSE 0.3).
  * Values written with save_set are kept with the game's own script variables: they are written
  * into every save game, replaced when a save is loaded, carried across level transitions, and
- * cleared when a new game starts. Write a value whenever it changes; there is no "before save"
- * step. Keys follow the topic rules; prefix them with your mod name.
+ * cleared when a new game starts. Write a value whenever it changes, or at blse.before_save
+ * (BLSE b0.5.9), published just before the game writes a save. Keys follow the topic rules;
+ * prefix them with your mod name.
  *
  * Published once after a save game has been loaded and restored, on the first server frame of
  * the loaded level: read your values here (at blse.level_init they may still be the old ones).
@@ -1577,16 +1944,33 @@ typedef struct BLSE_PluginInfo {
  * anim_chosen: an NPC's AI picked a sequence for an activity. Payload: handle, classname, name, the
  * activity asked for, the activity after the game's translation (by weapon), the sequence's name
  * and "1" if a rule or filter changed the game's choice (else "0"). Frequent: listen only while
- * needed. */
+ * needed. Since C18b also for the other picks (gestures, melee attacks, knockback flights, the
+ * player), with the same fields; for those the translated activity is the activity itself (the
+ * player's: the activity asked for, then the one the game translated it to). C36, first person
+ * (only while a first-person rule, a BLSE_ANIM_PICK_VIEWMODEL filter or a Python request exists):
+ * the weapon (handle and classname of the weapon, activity = translated = the one sent) and the
+ * hands view model (classname "viewmodel", activity = the weapon's, translated = the hands').
+ * anim_event (C35): a model's animation event reached the server. Payload: handle, classname,
+ * name, sequence number, sequence name, the event's number, its options text, the cycle ("0.500"),
+ * and what BLSE did: "kept", "changed" or "blocked" (the number and options are the model's). */
 #define BLSE_MSG_ANIM_STARTED "blse.anim_started"
 #define BLSE_MSG_ANIM_ENDED "blse.anim_ended"
 #define BLSE_MSG_ANIM_CHOSEN "blse.anim_chosen"
+#define BLSE_MSG_ANIM_EVENT "blse.anim_event"
 /* Player outfits (C34). outfit_changed: the player model slot changed. Payload, NUL-separated: the
  * outfit now ("" none, "*" a raw model from set_player_model), the one before, the model BLSE set
  * ("" the game's own), the reason: "wear", "remove", "load" (worn again from a save), "missing" (a
  * save's or the worn outfit's model or registration is gone: the game's model is back), "level" (a
  * raw model without keep ended with the level), "unregistered" (its plugin went away). */
 #define BLSE_MSG_OUTFIT_CHANGED "blse.outfit_changed"
+/* Skill attempts (0.7). skill_attempt: the player started an attempt on a lock a mod took. Payload,
+ * NUL-separated: the entity's handle (decimal), classname, targetname, model, skill type, difficulty,
+ * who holds it ("python" or a plugin's name). skill_attempt_end: that attempt ended. Payload: the
+ * handle, the reason: "success", "fail", "botch", "cancel" (skill_result, or its owner went away),
+ * "use" (the player pressed Use again) or "game" (the game ended it: damage, a cutscene, a level change, the lock
+ * could no longer be tried, e.g. the lockpicks were taken away). */
+#define BLSE_MSG_SKILL_ATTEMPT "blse.skill_attempt"
+#define BLSE_MSG_SKILL_ATTEMPT_END "blse.skill_attempt_end"
 
 #ifdef __cplusplus
 }

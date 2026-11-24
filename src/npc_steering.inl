@@ -1,3 +1,5 @@
+// Engine Fixes and Tweaks for Vampire: The Masquerade - Bloodlines.
+// Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms: see LICENSE and NOTICE.
 // NPC local-avoidance damping and move_yaw smoothing (0.8.1).
 //
 // IDA (vampire.dll, server profile vtmb-x86-...-c546f4de-...):
@@ -48,6 +50,12 @@ SteeringState steering_states[256];
 ClampGuard clamp_guards[256];
 MoveYawState move_yaw_states[256];
 float steering_turn_rate = 360.0f, move_yaw_rate = 360.0f, steering_max_leg_angle = 30.0f, steering_follow = 0.4f;
+// While an NPC is walking forward (faces_move: no facing target, not walking backwards), any large
+// move_yaw is temporary body-turn lag during obstacle/NPC avoidance (especially when checked_solve
+// falls back to the raw solver direction). Capping move_yaw here keeps the legs in a natural forward
+// walk instead of jolting into the sideways strafe / backpedal blend, while combat strafing and
+// backpedaling (faces_move == false) stay uncapped.
+float walk_max_move_yaw = 10.0f, walk_move_yaw_rate = 120.0f;
 unsigned steering_damped_count = 0, move_yaw_smoothed_count = 0, leg_clamp_count = 0, leg_clamp_skipped = 0, leg_clamp_suspended = 0;
 // 0.8.6 (captured 17:07:03, walking-0.8.5-...-1705.log): a damped direction can fail the obstacle
 // check in CAI_PlaneSolver::Solve (0x1030aea0, thiscall(goal, probe, out), retn 0Ch). Solve then
@@ -141,15 +149,24 @@ bool clamp_leg_direction(float wanted, float body, float max_leg, float turn_rat
 }
 
 // Pure decision for the move_yaw pose value (degrees, -180..180).
-float smoothed_move_yaw(MoveYawState& state, const void* npc, float now, float rate, float raw, bool& changed) {
+// When max_abs < 180 (forward walking without a facing target), the target is clamped to
+// [-max_abs, +max_abs] before rate limiting so avoidance turns never jolt into a sidestep/backpedal
+// pose, while transitions out of strafing still blend smoothly.
+float smoothed_move_yaw(MoveYawState& state, const void* npc, float now, float rate, float raw, bool& changed,
+                        float max_abs = 180.0f) {
     changed = false;
     if (!std::isfinite(raw) || !std::isfinite(now) || !(rate > 0.0f)) { state = {}; return raw; }
-    float applied = raw;
+    float target = wrap_degrees(raw);
+    if (std::isfinite(max_abs) && max_abs >= 0.0f && max_abs < 180.0f) {
+        if (target > max_abs) target = max_abs;
+        else if (target < -max_abs) target = -max_abs;
+    }
+    float applied = target;
     const float age = now - state.time;
     if (state.npc == npc && age >= 0.0f && age <= 0.5f) {
-        applied = approach_degrees(raw, state.value, rate * age);
-        changed = applied != wrap_degrees(raw);
+        applied = approach_degrees(target, state.value, rate * age);
     }
+    changed = applied != wrap_degrees(raw);
     state = {npc, now, applied};
     return applied;
 }
@@ -293,17 +310,26 @@ char __fastcall checked_solve(void* solver, void*, float* goal, float probe, flo
     float dir[3] = {};
     bool saved = false;
     __try { std::memcpy(dir, goal + 3, sizeof(dir)); saved = true; } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    steering_changed = false;
-    const char first = original_solve(solver, goal, probe, out);
-    if (first || !steering_changed || !saved) return first;
-    __try { std::memcpy(goal + 3, dir, sizeof(dir)); } __except (EXCEPTION_EXECUTE_HANDLER) { return first; }
-    steering_bypass = true;
-    const char second = original_solve(solver, goal, probe, out);
-    steering_bypass = false;
-    steering_changed = false;
-    ++solve_retries;
-    if (second) ++solve_retry_saved;
-    return second;
+    const bool prev_bypass = steering_bypass;
+    char result = 0;
+    __try {
+        steering_changed = false;
+        result = original_solve(solver, goal, probe, out);
+        if (!result && steering_changed && saved) {
+            bool restored = false;
+            __try { std::memcpy(goal + 3, dir, sizeof(dir)); restored = true; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            if (restored) {
+                steering_bypass = true;
+                result = original_solve(solver, goal, probe, out);
+                ++solve_retries;
+                if (result) ++solve_retry_saved;
+            }
+        }
+    } __finally {
+        steering_bypass = prev_bypass;
+        steering_changed = false;
+    }
+    return result;
 }
 
 int __fastcall smooth_apply_move_yaw(void* npc, void*, int argument) {
@@ -312,7 +338,12 @@ int __fastcall smooth_apply_move_yaw(void* npc, void*, int argument) {
     bool changed = false;
     float now = 0;
     __try { now = server_time(); } __except (EXCEPTION_EXECUTE_HANDLER) { return original_apply_move_yaw(npc, argument); }
-    const float applied = smoothed_move_yaw(move_yaw_slot(npc), npc, now, move_yaw_rate, raw, changed);
+    const auto& steer = steering_slot(npc);
+    const float steer_age = now - steer.time;
+    const bool walking_forward = steer.npc == npc && steer.faces_move && steer_age >= 0.0f && steer_age <= 0.3f;
+    const float rate = walking_forward ? walk_move_yaw_rate : move_yaw_rate;
+    const float max_abs = walking_forward ? walk_max_move_yaw : 180.0f;
+    const float applied = smoothed_move_yaw(move_yaw_slot(npc), npc, now, rate, raw, changed, max_abs);
     if (!changed) return original_apply_move_yaw(npc, argument);
     // The field is only read here (IDA xrefs); MoveFacing writes a fresh raw value each move.
     *field = applied;
@@ -374,6 +405,8 @@ void install_move_yaw_smoothing() {
     if (!module) return;
     server_base = reinterpret_cast<std::uintptr_t>(module);
     move_yaw_rate = setting_number("npc_move_yaw_rate", "360", 30.0f, 3600.0f);
+    walk_max_move_yaw = setting_number("npc_walk_max_move_yaw", "10", 0.0f, 180.0f);
+    walk_move_yaw_rate = setting_number("npc_walk_move_yaw_rate", "120", 15.0f, 3600.0f);
     const unsigned char bytes[] = {0xd9,0x81,0xec,0x63,0x00,0x00};
     void* original_apply = nullptr;
     if (host->hook_function(host->context, reinterpret_cast<void*>(server_base + 0x2bf310), bytes, sizeof(bytes),
@@ -382,7 +415,8 @@ void install_move_yaw_smoothing() {
         return;
     }
     original_apply_move_yaw = reinterpret_cast<ApplyMoveYawFn>(original_apply);
-    char message[192];
-    sprintf_s(message, "NPC move_yaw smoothing enabled: leg direction changes at most %.0f deg/s.", move_yaw_rate);
+    char message[256];
+    sprintf_s(message, "NPC move_yaw smoothing enabled: leg direction changes at most %.0f deg/s (forward walk capped to +-%.0f deg at %.0f deg/s).",
+              move_yaw_rate, walk_max_move_yaw, walk_move_yaw_rate);
     host->log(message);
 }

@@ -1,6 +1,6 @@
 // Engine Fixes and Tweaks for Vampire: The Masquerade - Bloodlines.
 // Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms: see LICENSE and NOTICE.
-// BLSE plugin.
+// Engine Fixes for Vampire: The Masquerade - Bloodlines (BLSE plugin).
 // Code-level bug fixes plus optional smoothing tweaks. Every hook is gated by the game build (BLSE's
 // build profile for vampire.dll; for client.dll its hash, or since 1.0.1 the same build edited in
 // place by a newer Unofficial Patch) and by whole-instruction byte checks, so an unknown or already
@@ -28,7 +28,7 @@ const char* const server_profile = "vtmb-x86-80d73e74-9d00b2c1-c546f4de-2ce854dd
 // Settings live in themed INI sections. A key is looked up in every section (names are unique),
 // then in the old [Fixes] section of pre-1.0 INIs, and is never written back: a missing key uses
 // its default, so the INI only holds what the user sees and changes.
-const char* const setting_sections[] = {"Fixes", "Tweaks", "EyeGlances", "Startup", "Effects", "Eyes", "NPCAnimation"};
+const char* const setting_sections[] = {"Fixes", "Performance", "Tweaks", "EyeGlances", "Startup", "Effects", "Eyes", "NPCAnimation"};
 bool read_setting(const char* key, char* out, size_t capacity) {
     for (const char* section : setting_sections) {
         size_t size = 0;
@@ -51,6 +51,15 @@ bool enabled(const char* key, const char* fallback = "1") {
 }
 bool server_profile_supported() {
     return host->build_profile && !std::strcmp(host->build_profile, server_profile);
+}
+// Memory Expansion's process split ([Split] enabled = 1): the world (vampire.dll) runs in a second
+// Vampire.exe with no window and the game window (client.dll) in the first; BLSE loads this plugin in
+// both. The world's process gets the vampire.dll fixes, the window's process the client.dll ones.
+// BLSE_SPLIT_NONE (single player, or a BLSE without the split link): everything, as before.
+int split_role() { return BLSE_HOST_HAS(host, split_role) && host->split_role ? host->split_role(host->context) : BLSE_SPLIT_NONE; }
+bool split_screen_only() {
+    return split_role() == BLSE_SPLIT_SCREEN && BLSE_HOST_HAS(host, split_linked) && host->split_linked &&
+           host->split_linked(host->context);
 }
 
 // --- build check for client.dll (BLSE's profile covers vampire.dll) ---
@@ -305,6 +314,7 @@ void install_idle_consistency() {
 }
 
 #include "pose_interpolation.inl"
+#include "posture_blend.inl"
 #include "npc_steering.inl"
 #include "eye_glance.inl"
 
@@ -318,12 +328,36 @@ int __fastcall pose_build(void* self, void*, int a, int b, int c) {
     end_pose_blend(pose_scope);
     return result;
 }
+bool verify_client_npc_class(const unsigned char* base) {
+    __try {
+        const auto get_class = base + 0x8e7e0;
+        std::uint32_t cls = 0;
+        std::memcpy(&cls, get_class + 1, 4);
+        const char* name = get_class[0] == 0xb8 && get_class[5] == 0xc3 && cls ? *reinterpret_cast<const char* const*>(cls + 8) : nullptr;
+        return name && !std::strcmp(name, "CAI_BaseNPCTroika") &&
+               reinterpret_cast<const unsigned char* const*>(base + 0x22cfd4)[2] == get_class;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 void install_pose_interpolation() {
     const auto module = GetModuleHandleW(L"client.dll");
     const auto server = GetModuleHandleW(L"vampire.dll");
     if (!module || !supported(module) || !server_profile_supported() || !server) {
         host->log("NPC pose interpolation disabled: unsupported or unavailable game build.");
         return;
+    }
+    // Process split: NPCs are known by their client class (the world's entities are in the other process).
+    // Checked first: CAI_BaseNPCTroika's GetClientClass (mov eax, offset ClientClass; ret) and the name.
+    pose_client_side = split_screen_only();
+    if (pose_client_side) {
+        const auto base = reinterpret_cast<const unsigned char*>(module);
+        if (!verify_client_npc_class(base)) {
+            pose_client_side = false;
+            host->log("NPC pose interpolation disabled: the client's NPC class differs (process split).");
+            return;
+        }
+        pose_client = reinterpret_cast<std::uintptr_t>(module);
     }
     const unsigned char expected[] = {0xb8,0xe0,0x26,0x00,0x00};
     void* trampoline = nullptr;
@@ -418,7 +452,7 @@ unsigned int __fastcall particle_think(void* self, void*) {
             const auto handle = words[98];
             const auto entries = *reinterpret_cast<std::uint32_t**>(client + 0x2b8e98);
             const auto index = (handle & 0x1fff) * 3;
-            orphan = handle == 0xffffffff || entries[index + 2] != (handle >> 13) || !entries[index + 1];
+            orphan = handle == 0xffffffff || !entries || entries[index + 2] != (handle >> 13) || !entries[index + 1];
         }
     }
     // Keep the game's detach, disable and scheduling behavior, then free the orphaned instance.
@@ -457,7 +491,8 @@ bool install_particle_cleanup() {
         return false;
     }
     original_think = reinterpret_cast<Think>(trampoline);
-    install_presence_lifetime();
+    if (split_screen_only()) host->log("Presence halo death cleanup: not in a split game (it reads the world's entities, in the other process).");
+    else install_presence_lifetime();
     host->log("Orphan particle fix enabled.");
     return true;
 }
@@ -485,9 +520,13 @@ void install_move_yaw_blend() {
     // an engine restart must not add a second pair.
     static bool subscribed = false;
     if (!subscribed) {
-        subscribed = host->subscribe(host->context, BLSE_MSG_LEVEL_INIT, refresh_move_yaw, nullptr) &&
-                     host->subscribe(host->context, BLSE_MSG_GAME_LOADED, refresh_move_yaw, nullptr);
-        if (!subscribed) host->log("NPC move_yaw blend: lifecycle subscription failed; initial change only.");
+        const auto level_sub = host->subscribe(host->context, BLSE_MSG_LEVEL_INIT, refresh_move_yaw, nullptr);
+        const auto load_sub = level_sub ? host->subscribe(host->context, BLSE_MSG_GAME_LOADED, refresh_move_yaw, nullptr) : 0;
+        if (level_sub && load_sub) subscribed = true;
+        else {
+            if (level_sub) host->unsubscribe(host->context, level_sub);
+            host->log("NPC move_yaw blend: lifecycle subscription failed; initial change only.");
+        }
     }
     host->log("NPC move_yaw blend enabled (debug_npc_move_yaw_snap 0).");
 }
@@ -512,23 +551,43 @@ void BLSE_CALL reset_npc_state(const char*, const void*, size_t, void*) {
 #include "loading_loose_stat.inl"
 #include "loading_sound_precache.inl"
 #include "knox_eyes.inl"
+#include "water_clip_plane.inl"
+#include "perf_math.inl"
+#include "perf_runtime.inl"
+#include "dsp_audio.inl"
 std::uint64_t startup_subscription = 0;
 bool shutdown_subscribed = false;
 void BLSE_CALL start_when_ready(const char*, const void*, size_t, void*) {
-    if (!GetModuleHandleW(L"client.dll")) return;
+    // Process split: the world's process has no client.dll (its first game frame is the moment); the
+    // window's process, while it shows the world process's level, has no world.
+    const int role = split_role();
+    const bool world = !split_screen_only();
+    const bool screen = role != BLSE_SPLIT_WORLD;
+    if (screen && !GetModuleHandleW(L"client.dll")) return;
     host->unsubscribe(host->context, startup_subscription);
     startup_subscription = 0;
-    if (enabled("orphan_particles")) install_particle_cleanup();
-    if (enabled("eye_target_interpolation")) install_eye_blend();
-    if (enabled("idle_sequence_consistency")) install_idle_consistency();
-    if (enabled("same_tick_walk_phase")) install_walk_phase();
-    if (enabled("npc_idle_pool")) install_npc_idle_pool();
-    if (enabled("npc_move_yaw_blend")) install_move_yaw_blend();
-    if (enabled("npc_steering_damping")) install_steering_damping();
-    if (enabled("npc_move_yaw_smoothing")) install_move_yaw_smoothing();
-    if (enabled("npc_pose_interpolation")) install_pose_interpolation();
-    install_eye_glance(); // [EyeGlances] enabled=1/0
-    knox_eyes::install(); // [Tweaks] knox_relaxed_eyes
+    if (role != BLSE_SPLIT_NONE)
+        host->log(world && screen ? "Memory Expansion's process split: not connected, all fixes here."
+                  : world ? "Memory Expansion's process split: the world's process: its fixes here (vampire.dll); the client's in the game window's process."
+                          : "Memory Expansion's process split: the game window's process: its fixes here (client.dll); the world's in the world's process.");
+    if (screen && enabled("orphan_particles")) install_particle_cleanup();
+    if (screen && enabled("eye_target_interpolation")) install_eye_blend();
+    if (world && enabled("idle_sequence_consistency")) install_idle_consistency();
+    if (world && enabled("same_tick_walk_phase")) install_walk_phase();
+    if (world && enabled("npc_idle_pool")) install_npc_idle_pool();
+    if (screen && enabled("npc_move_yaw_blend")) install_move_yaw_blend();
+    if (world && enabled("npc_steering_damping")) install_steering_damping();
+    if (world && enabled("npc_move_yaw_smoothing")) install_move_yaw_smoothing();
+    if (screen && enabled("npc_pose_interpolation")) install_pose_interpolation();
+    if (screen && enabled("npc_posture_blend")) install_posture_blend();
+    if (screen && enabled("water_clip_plane")) water_clip_plane::install();
+    if (screen && enabled("dsp_spatial_fix")) dsp_audio::install();
+    if (world) install_eye_glance(); // [EyeGlances] enabled=1/0
+    if (screen) knox_eyes::install(); // [Tweaks] knox_relaxed_eyes
+    perf_math::install(); // [Performance] fast_math, fast_memcpy, fast_stricmp across loaded game DLLs
+    perf_runtime::install_common(); // [Performance] fast_timer (tier0.dll Plat_FloatTime)
+    if (screen) perf_runtime::install_screen(GetModuleHandleW(L"client.dll"));
+    if (world) perf_runtime::install_world();
     if (!shutdown_subscribed) shutdown_subscribed = host->subscribe(host->context, BLSE_MSG_LEVEL_SHUTDOWN, reset_npc_state, nullptr) != 0;
 }
 
@@ -540,6 +599,15 @@ void BLSE_CALL rearm_after_restart(const char*, const void*, size_t, void*) {
     checked_module = nullptr;
     checked_result = false;
     pose_interpolation = false;
+    pose_client_side = false;
+    pose_client = 0;
+    presence_server = 0;
+    server_base = 0;
+    client = 0;
+    glance_server = 0;
+    water_clip_plane::reset();
+    dsp_audio::reset();
+    perf_runtime::reset_on_restart();
     reset_npc_state(nullptr, nullptr, 0, nullptr);
     if (!startup_subscription) startup_subscription = host->subscribe(host->context, BLSE_MSG_GAME_FRAME, start_when_ready, nullptr);
     host->log(startup_subscription ? "Engine restarted: the fixes are installed again when client.dll is ready."

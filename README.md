@@ -16,6 +16,22 @@ A [BLSE](https://gitlab.com/bigbannng/bloodlines-script-extender) plugin for *Va
 | `npc_idle_pool` | NPCs no longer pick the player character's idle animations |
 | `npc_move_yaw_blend` | Turns off a debug setting the game ships with, which snaps NPC legs to a new walking direction |
 | `npc_pose_interpolation` | NPC leg movement is blended every frame instead of updating 10 times a second |
+| `npc_posture_blend` | Smoothly blends NPC posture transitions (standing, seated, low, lying) |
+| `water_clip_plane` | Fixes fixed-function water clip planes so water refraction passes do not corrupt non-bumped surfaces |
+| `dsp_spatial_fix` | Fixes hollow/echoey Environmental Effects (`dsp_on 1`) audio by bypassing the buggy master-bus wall-delay (`dsp_spatial` preset 40) and guarding `MDY_Alloc`'s `+INF` rate overflow |
+
+**Performance** (`[Performance]`)
+
+| Setting | What it optimizes |
+|---|---|
+| `fast_math`, `fast_memcpy`, `fast_stricmp` | SSE2 replacements for hot x87 math, memory copy and case-insensitive string compares |
+| `fast_timer` | SSE2 `Plat_FloatTime` timer in `tier0.dll` |
+| `fast_angle_math` | SSE2 vectorized `AngleMatrix` and `AngleVectors` |
+| `fast_monitor_cast` | Vtable-cached dynamic casts in `CViewRender::DrawHighEndMonitors` |
+| `fast_entity_flags` | Removes debug scope-trace overhead from hot entity flag helpers |
+| `fast_richtext` | `O(log N)` binary search for console `RichText::GetCursorLine` |
+| `fast_cvar_lookup` | `O(1)` hash cache for `CCvar::FindVar` |
+| `fast_delta_bits`, `fast_prop_codec`, `fast_vstdlib` | Fast delta-bit, network property codec and `vstdlib.dll` string/memory paths |
 
 **Speed** (`[Startup]` and `[Loading]`)
 

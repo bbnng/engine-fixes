@@ -6,7 +6,7 @@ cd /d "%~dp0"
 call :ensure_x86_cl || exit /b 1
 if not exist build mkdir build
 rc /nologo /fo build\engine_fixes.res src\engine_fixes.rc || exit /b 1
-cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Iinclude /LD src\engine_fixes.cpp build\engine_fixes.res /Fobuild\engine_fixes.obj /Febuild\engine_fixes.dll /link /INCREMENTAL:NO /IMPLIB:build\engine_fixes.lib || exit /b 1
+cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Oi /Ot /GL /arch:SSE2 /Iinclude /LD src\engine_fixes.cpp build\engine_fixes.res /Fobuild\engine_fixes.obj /Febuild\engine_fixes.dll /link /LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO /IMPLIB:build\engine_fixes.lib || exit /b 1
 cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Iinclude /c src\engine_fixes_intro.cpp /Fobuild\engine_fixes_intro.obj || exit /b 1
 cl /nologo /std:c++17 /W4 /EHsc /MT /O2 /Iinclude /c src\intro_worker.cpp /Fobuild\intro_worker.obj || exit /b 1
 rc /nologo /fo build\engine_fixes_intro.res src\engine_fixes_intro.rc || exit /b 1

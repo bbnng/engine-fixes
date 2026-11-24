@@ -1,3 +1,5 @@
+// Engine Fixes and Tweaks for Vampire: The Masquerade - Bloodlines.
+// Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms: see LICENSE and NOTICE.
 // Client-side NPC pose parameter interpolation (0.8.3).
 //
 // The server sends NPC pose parameters (for walkers: move_yaw, the legs' movement direction)
@@ -87,8 +89,36 @@ void finish_pose_blend(PoseBlend& state, unsigned mask, float* poses, const floa
     }
 }
 
+// Memory Expansion's process split: the game process's vampire.dll runs no world, so an NPC is
+// known by its client class (every NPC is networked as CAI_BaseNPCTroika: IClientNetworkable at +8,
+// its GetClientClass is slot 2, the class name at +8) and its handle by client.dll's entity list.
+bool pose_client_side = false;
+std::uintptr_t pose_client = 0;
+PoseBlend* npc_pose_slot_client(const void* self, unsigned& handle) {
+    const auto c = static_cast<const unsigned char*>(self);
+    const int index = *reinterpret_cast<const int*>(c + 0x44);
+    if (index <= 1 || index >= 2048) return nullptr;
+    auto networkable = const_cast<unsigned char*>(c + 8);
+    using GetClientClass = const unsigned char* (__thiscall*)(void*);
+    const auto vtable = *reinterpret_cast<void* const* const*>(networkable);
+    if (!vtable) return nullptr;
+    const unsigned char* cls = reinterpret_cast<GetClientClass>(vtable[2])(networkable);
+    const char* name = cls ? *reinterpret_cast<const char* const*>(cls + 8) : nullptr;
+    if (!name || std::strcmp(name, "CAI_BaseNPCTroika")) return nullptr;
+    const auto entries = *reinterpret_cast<const std::uint32_t* const*>(pose_client + 0x2b8e98);
+    if (!entries) return nullptr;
+    handle = (entries[index * 3 + 2] << 13) | static_cast<unsigned>(index);
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        host->log("NPC pose interpolation: first NPC found by its client class (process split).");
+    }
+    return &pose_blends[index];
+}
+
 // Returns the slot for an NPC's client entity, or nullptr when the entity is not an NPC.
 PoseBlend* npc_pose_slot(const void* self, unsigned& handle) {
+    if (pose_client_side) return npc_pose_slot_client(self, handle);
     if (!server_base) return nullptr;
     const auto c = static_cast<const unsigned char*>(self);
     const int index = *reinterpret_cast<const int*>(c + 0x44);
@@ -120,7 +150,8 @@ void begin_pose_blend(void* self, PoseBlendScope& scope) {
         scope.mask = prepare_pose_blend(*state, self, handle, pose_clock_ms(), pose_interpolation_ms, poses, scope.shown);
         scope.state = state;
         scope.poses = poses;
-        if (scope.mask) ++pose_blend_frames;
+        if (scope.mask && ++pose_blend_frames == 1 && pose_client_side)
+            host->log("NPC pose interpolation: first NPC pose blended (process split: NPCs known by their client class).");
     } __except (EXCEPTION_EXECUTE_HANDLER) { scope = {}; }
 }
 void end_pose_blend(PoseBlendScope& scope) {

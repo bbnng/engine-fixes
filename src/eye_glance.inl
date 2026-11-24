@@ -1,3 +1,5 @@
+// Engine Fixes and Tweaks for Vampire: The Masquerade - Bloodlines.
+// Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms: see LICENSE and NOTICE.
 // NPC dialogue eye glances (0.9.0, reworked 0.9.2). Settings: [EyeGlances] in engine_fixes.ini.
 //
 // vdata/system/dispositiontable.txt gives dispositions an EyeTarget block (others inherit
@@ -6,8 +8,8 @@
 // direction (7/8/9 up, 1/2/3 down, 4/6 sideways, 5 straight ahead), 25 units out (0x1026b580). The
 // glance moves the eye target by EyeTarget "Eye Turn Rate" per 0.1 s: 0.3 for Neutral and every
 // disposition inheriting it, against 0.9 for the normal gaze, and only advances once the eyes
-// arrive. So the eyes swept out over ~0.4-0.5 s and back just as slowly: the "eye roll".
-// A few dispositions author their own
+// arrive. So the eyes swept out over ~0.4-0.5 s and back just as slowly: the "eye roll"
+//. A few dispositions author their own
 // glances: Apathy [7,8,9] at 0.2 with a 1-2 s hold (a deliberate bored eye roll), Confused [7,5,9],
 // Disgust [0,2,3], Anger/PrinceSitting [0,2,0], Damaged [0,0,0].
 //
@@ -58,6 +60,7 @@ const unsigned char* disposition_record(const void* table, int index) {
     if (!table) return nullptr;
     const auto t = static_cast<const int*>(table);
     if (index < 0 || index > t[5]) index = t[1];
+    if (index < 0 || index > t[5]) return nullptr;
     const auto records = reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(t[2]));
     return records ? records + 612 * index : nullptr;
 }
@@ -75,12 +78,14 @@ int pick_glance_direction(const float w[6], float r) {
     for (int i = 0; i < 9; ++i) total += std::isfinite(w[group[i]]) && w[group[i]] > 0 ? w[group[i]] : 0.0f;
     if (!(total > 0.0f)) return 0;
     float at = (std::isfinite(r) ? std::fmin(std::fmax(r, 0.0f), 0.999999f) : 0.0f) * total;
+    int last_nonzero = 0;
     for (int i = 0; i < 9; ++i) {
         const float weight = std::isfinite(w[group[i]]) && w[group[i]] > 0 ? w[group[i]] : 0.0f;
+        if (weight > 0.0f) last_nonzero = types[i];
         if (at < weight) return types[i];
         at -= weight;
     }
-    return types[8];
+    return last_nonzero;
 }
 // Rotate the glance point toward the eye direction so its angle becomes `factor` times the game's.
 bool scale_glance_point(const float pos[3], const float dir[3], float point[3], float factor) {
@@ -139,6 +144,7 @@ int __fastcall shaped_eye_hold(void* table, void*, int index, float* min, float*
     __try {
         if (min && glance.hold_min > 0.0f) *min = glance.hold_min;
         if (max && glance.hold_max > 0.0f) *max = glance.hold_max;
+        if (min && max && *max < *min) *max = *min;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return result;
 }
@@ -216,6 +222,7 @@ void install_eye_glance() {
     glance_server = reinterpret_cast<std::uintptr_t>(module);
     game_eye_position = reinterpret_cast<EyePositionFn>(module + 0x331da0);
     glance_random_state ^= static_cast<unsigned>(GetTickCount64());
+    if (!glance_random_state) glance_random_state = 0x9e3779b9u;
     struct Hook { unsigned rva; unsigned char bytes[8]; unsigned size; void* detour; void** original; };
     const Hook hooks[] = {
         {0xecdf0, {0x8b,0x44,0x24,0x04,0x85,0xc0}, 6, reinterpret_cast<void*>(shaped_eye_turn_rate), reinterpret_cast<void**>(&original_eye_turn_rate)},
