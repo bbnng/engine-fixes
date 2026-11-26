@@ -1,0 +1,38 @@
+name: Build and Package
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "[0-9]+.[0-9]+*"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build x86 binaries
+        shell: cmd
+        run: build.cmd
+
+      - name: Package release archive
+        shell: pwsh
+        run: |
+          python tools/package_release.py
+          Get-ChildItem dist/*.zip | Select-Object Name, Length
+
+      - name: Upload build artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-fixes
+          path: dist/EngineFixes-*.zip
+          if-no-files-found: error
