@@ -608,6 +608,7 @@ void attach_modules() {
 
 // --- main-thread task: bounded summaries, attach retries only while a session is open ---
 bool menu_listed() {
+    if (split_role()==BLSE_SPLIT_WORLD) return false;
     if (!BLSE_HOST_HAS(host,open_menus) || !host->open_menus) return false;
     char names[512]={}; size_t size=0;
     if (!host->open_menus(host->context,names,sizeof names,&size) || size>=sizeof names) return false;
@@ -712,7 +713,12 @@ bool subscribe_all() {
         {BLSE_MSG_MENU_OPENED,on_menu},{BLSE_MSG_MENU_CLOSED,on_menu},{BLSE_MSG_ENGINE_RESTART,on_restart}};
     static_assert(_countof(topics)==_countof(subscriptions),"subscription slots");
     subscription_count=0;
+    // Process split (BLSE 0.7.2+): the world's process has no window, but BLSE forwards the
+    // window's menu events to it about a frame late. Its game_menu/loading screens are not this
+    // process's, so they must not end its startup capture or stamp ui_closed; skip them there.
+    const bool world_process=split_role()==BLSE_SPLIT_WORLD;
     for (const auto& topic:topics) {
+        if (world_process && topic.callback==on_menu) continue;
         const auto id=host->subscribe(host->context,topic.name,topic.callback,nullptr);
         if (!id) {
             for (unsigned i=0;i<subscription_count;++i) host->unsubscribe(host->context,subscriptions[i]);

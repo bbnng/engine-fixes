@@ -17,6 +17,7 @@
 #include <emmintrin.h>
 #include <cstdint>
 #include <cstring>
+#include <new>
 
 namespace perf_runtime {
 
@@ -240,14 +241,18 @@ inline double __cdecl fast_plat_float_time() {
     return vt[6](t);
 }
 
-inline bool write_bytes_protected(unsigned char* dst, const unsigned char* src, std::size_t n) {
-    DWORD old_prot = 0;
-    if (!VirtualProtect(dst, n, PAGE_EXECUTE_READWRITE, &old_prot)) return false;
-    std::memcpy(dst, src, n);
-    VirtualProtect(dst, n, old_prot, &old_prot);
-    FlushInstructionCache(GetCurrentProcess(), dst, n);
-    return true;
+// --- CBaseEntity::GetFlags / AddFlag / RemoveFlag / Relink without g_ScopeTraceStack (vampire.dll) ---
+// The natives are __thiscall (the entity in ecx): GetFlags and Relink take no arguments, AddFlag and
+// RemoveFlag one on the stack that they pop. __fastcall with an unused edx parameter is the same.
+constexpr std::uintptr_t kFlagsOffset = 0x434; // m_fFlags, as each native body reads or writes it
+
+inline std::uint32_t& entity_flags(void* self) {
+    return *reinterpret_cast<std::uint32_t*>(static_cast<unsigned char*>(self) + kFlagsOffset);
 }
+inline std::uint32_t __fastcall fast_get_flags(void* self) { return entity_flags(self); }
+inline void __fastcall fast_add_flag(void* self, void*, std::uint32_t flags) { entity_flags(self) |= flags; }
+inline void __fastcall fast_remove_flag(void* self, void*, std::uint32_t flags) { entity_flags(self) &= ~flags; }
+inline void __fastcall fast_relink(void*) {} // the native body only pushes and pops the scope trace
 
 // --- Smooth C_BaseAnimating::GetAnimTimeInterval (client.dll+0x8F960) ---
 // Vanilla bug: if m_flAnimTime == m_flOldAnimTime (dt <= 0), it returns constant 1.0f, freezing
@@ -361,13 +366,19 @@ struct CvarLookupCache {
         unsigned char* node;
         unsigned char* previous; // the list node before `node` (nullptr: the head)
     };
-    Slot slots[kCap] = {};
+    // kCap entries (64 KB) from the heap, allocated with the first lookup. Never freed: the game's
+    // DLLs can still look variables up while the process exits, after this DLL's destructors ran.
+    Slot* slots = nullptr;
     void* cached_head = nullptr;
-    bool overflowed = false;
+    unsigned char* cached_tail = nullptr;
+    unsigned char* tail_prev = nullptr;
+    bool overflowed = false; // too many entries, or no memory for them: the list is searched
 
     void clear() {
-        std::memset(slots, 0, sizeof(slots));
+        if (slots) std::memset(slots, 0, sizeof(Slot) * kCap);
         cached_head = nullptr;
+        cached_tail = nullptr;
+        tail_prev = nullptr;
         overflowed = false;
     }
 
@@ -380,13 +391,31 @@ struct CvarLookupCache {
         return h ? h : 1u;
     }
 
+    static void* linear_find(void* head, const char* name) {
+        if (!head || !name) return nullptr;
+        for (auto* cur = reinterpret_cast<unsigned char*>(head); cur; cur = *reinterpret_cast<unsigned char**>(cur + 8)) {
+            auto* base = *reinterpret_cast<unsigned char**>(cur + 4);
+            const char* n = base ? *reinterpret_cast<const char**>(base + 0x10) : nullptr;
+            if (n && fast_stricmp_lut(name, n) == 0) return cur;
+        }
+        return nullptr;
+    }
+
     void rebuild(void* head) {
-        std::memset(slots, 0, sizeof(slots));
+        clear();
         cached_head = head;
-        overflowed = false;
+        if (!slots) slots = new (std::nothrow) Slot[kCap]();
+        if (!slots) {
+            overflowed = true;
+            return;
+        }
         std::size_t count = 0;
         unsigned char* previous = nullptr;
+        unsigned char* last = nullptr;
+        unsigned char* last_prev = nullptr;
         for (auto* cur = reinterpret_cast<unsigned char*>(head); cur; previous = cur, cur = *reinterpret_cast<unsigned char**>(cur + 8)) {
+            last = cur;
+            last_prev = previous;
             auto* base = *reinterpret_cast<unsigned char**>(cur + 4);
             const char* name = base ? *reinterpret_cast<const char**>(base + 0x10) : nullptr;
             if (!name) continue;
@@ -409,12 +438,14 @@ struct CvarLookupCache {
                 idx = (idx + 1) & (kCap - 1);
             }
         }
+        cached_tail = last;
+        tail_prev = last_prev;
     }
 
     // Still linked where it was when cached? CCvar::UnlinkVariables (engine.dll+0x40160) removes a
     // DLL's nodes and reverses the list, so after two calls (client, then server) the old head can be
-    // back in place while cached nodes belong to an unloaded DLL. Every unlinked node loses its link,
-    // and the node before it gets another one.
+    // back in place while cached nodes belong to an unloaded DLL, or a newly registered node sits
+    // behind the old tail. Every unlinked node loses its link, and the node before it gets another.
     static bool still_linked(const Slot& s, const void* head) {
         __try {
             return s.previous ? *reinterpret_cast<unsigned char* const*>(s.previous + 8) == s.node : s.node == head;
@@ -423,9 +454,20 @@ struct CvarLookupCache {
         }
     }
 
+    bool tail_intact(const void* head) const {
+        if (!cached_tail) return true;
+        __try {
+            if (tail_prev ? *reinterpret_cast<unsigned char* const*>(tail_prev + 8) != cached_tail : cached_tail != head)
+                return false;
+            return *reinterpret_cast<unsigned char* const*>(cached_tail + 8) == nullptr;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
     void* find(void* head, const char* name) {
         if (!head || !name) return nullptr;
-        if (head != cached_head) rebuild(head);
+        if (head != cached_head || (!overflowed && !tail_intact(head))) rebuild(head);
         void* node = nullptr;
         if (lookup(head, name, node)) return node;
         rebuild(head); // the list changed behind the same head
@@ -435,12 +477,8 @@ struct CvarLookupCache {
     // False when a cached entry that could match is stale; `node` is the result otherwise.
     bool lookup(void* head, const char* name, void*& node) {
         node = nullptr;
-        if (overflowed) {
-            for (auto* cur = reinterpret_cast<unsigned char*>(head); cur; cur = *reinterpret_cast<unsigned char**>(cur + 8)) {
-                auto* base = *reinterpret_cast<unsigned char**>(cur + 4);
-                const char* n = base ? *reinterpret_cast<const char**>(base + 0x10) : nullptr;
-                if (n && fast_stricmp_lut(name, n) == 0) { node = cur; return true; }
-            }
+        if (overflowed || !slots) {
+            node = linear_find(head, name);
             return true;
         }
         const std::uint32_t h = hash_ci(name);
@@ -459,10 +497,14 @@ struct CvarLookupCache {
 
 inline CvarLookupCache g_cvar_cache;
 inline void* const* g_cvar_list_head = nullptr;
+inline DWORD g_cvar_main_thread = 0;
 
 inline void* __cdecl fast_cvar_find_var(const char* name) {
     if (!g_cvar_list_head) return nullptr;
-    return g_cvar_cache.find(*g_cvar_list_head, name);
+    void* head = *g_cvar_list_head;
+    if (g_cvar_main_thread && GetCurrentThreadId() != g_cvar_main_thread)
+        return CvarLookupCache::linear_find(head, name);
+    return g_cvar_cache.find(head, name);
 }
 
 // --- Fast 64-bit CDeltaBitsWriter / CDeltaBitsReader (engine.dll+0x5F1E0, +0x5F360) ---
@@ -837,7 +879,7 @@ inline void install_common() {
                     g_inv_clock_freq = 1.0 / static_cast<double>(freq);
                     g_clock_filter_flag = reinterpret_cast<const std::uint32_t*>(base + 0x2B3F0);
                     g_clock_filter_vt = reinterpret_cast<void* const*>(base + 0x21EB4);
-                    if (perf_math::write_jmp5(fn, reinterpret_cast<void*>(fast_plat_float_time))) {
+                    if (perf_math::replace_function(fn, 8, reinterpret_cast<void*>(fast_plat_float_time))) {
                         host->log("Fast SSE2 Plat_FloatTime enabled (tier0.dll+0x38D0).");
                     }
                 }
@@ -863,8 +905,9 @@ inline void install_common() {
             u32_at_equals(fn + 3, b + 0xA3F45C) &&
             std::memcmp(fn + 7, kFindVarTail, sizeof(kFindVarTail)) == 0) {
             g_cvar_list_head = reinterpret_cast<void* const*>(base + 0xA3F45C);
+            g_cvar_main_thread = GetCurrentThreadId();
             g_cvar_cache.clear();
-            if (perf_math::write_jmp5(fn, reinterpret_cast<void*>(fast_cvar_find_var))) {
+            if (perf_math::replace_function(fn, 7, reinterpret_cast<void*>(fast_cvar_find_var))) {
                 host->log("Fast O(1) CCvar::FindVar hash cache enabled (engine.dll+0x400E0).");
             }
         }
@@ -883,10 +926,10 @@ inline void install_common() {
         };
         int hooked = 0;
         if (std::memcmp(base + 0x5F1E0, kWritePropHead, sizeof(kWritePropHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x5F1E0, reinterpret_cast<void*>(fast_delta_write_prop_index)))
+            perf_math::replace_function(base + 0x5F1E0, 7, reinterpret_cast<void*>(fast_delta_write_prop_index)))
             ++hooked;
         if (std::memcmp(base + 0x5F360, kReadPropHead, sizeof(kReadPropHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x5F360, reinterpret_cast<void*>(fast_delta_read_next_prop_index)))
+            perf_math::replace_function(base + 0x5F360, 5, reinterpret_cast<void*>(fast_delta_read_next_prop_index)))
             ++hooked;
         if (hooked > 0) {
             char msg[128];
@@ -923,13 +966,13 @@ inline void install_common() {
         }
         int hooked = 0;
         if (readers_ok && std::memcmp(base + 0x60820, kFloatDecodeHead, sizeof(kFloatDecodeHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x60820, reinterpret_cast<void*>(fast_float_decode)))
+            perf_math::replace_function(base + 0x60820, 8, reinterpret_cast<void*>(fast_float_decode)))
             ++hooked;
         if (std::memcmp(base + 0x60500, kIntCompareHead, sizeof(kIntCompareHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x60500, reinterpret_cast<void*>(fast_int_compare)))
+            perf_math::replace_function(base + 0x60500, 5, reinterpret_cast<void*>(fast_int_compare)))
             ++hooked;
         if (readers_ok && std::memcmp(base + 0x609E0, kFloatCompareHead, sizeof(kFloatCompareHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x609E0, reinterpret_cast<void*>(fast_float_compare)))
+            perf_math::replace_function(base + 0x609E0, 7, reinterpret_cast<void*>(fast_float_compare)))
             ++hooked;
         if (hooked > 0) {
             char msg[128];
@@ -947,19 +990,20 @@ inline void install_common() {
                 const char* name;
                 unsigned char prefix[6];
                 std::size_t prefix_len;
+                std::size_t hook_size; // whole instructions
                 void* target;
             };
             static const VstdHook kVstdHooks[] = {
-                {"Q_strncmp",     {0x53, 0x8B, 0x1D, 0x00, 0x00, 0x00}, 3, reinterpret_cast<void*>(fast_q_strncmp)},
-                {"Q_strnlwr",     {0x8B, 0x44, 0x24, 0x08, 0x56, 0x8B}, 6, reinterpret_cast<void*>(fast_strnlwr_lut)},
-                {"Q_strncasecmp", {0x53, 0x56, 0x8B, 0x35, 0x00, 0x00}, 4, reinterpret_cast<void*>(fast_q_strncasecmp)},
-                {"Q_strcasecmp",  {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, reinterpret_cast<void*>(fast_q_strcasecmp)},
-                {"Q_strnicmp",    {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, reinterpret_cast<void*>(fast_q_strncasecmp)},
+                {"Q_strncmp",     {0x53, 0x8B, 0x1D, 0x00, 0x00, 0x00}, 3, 7, reinterpret_cast<void*>(fast_q_strncmp)},
+                {"Q_strnlwr",     {0x8B, 0x44, 0x24, 0x08, 0x56, 0x8B}, 6, 5, reinterpret_cast<void*>(fast_strnlwr_lut)},
+                {"Q_strncasecmp", {0x53, 0x56, 0x8B, 0x35, 0x00, 0x00}, 4, 8, reinterpret_cast<void*>(fast_q_strncasecmp)},
+                {"Q_strcasecmp",  {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, 6, reinterpret_cast<void*>(fast_q_strcasecmp)},
+                {"Q_strnicmp",    {0x53, 0x56, 0x8B, 0x74, 0x24, 0x0C}, 6, 6, reinterpret_cast<void*>(fast_q_strncasecmp)},
             };
             int patched = 0;
             for (const auto& h : kVstdHooks) {
                 auto* fn = reinterpret_cast<unsigned char*>(GetProcAddress(vstd, h.name));
-                if (fn && std::memcmp(fn, h.prefix, h.prefix_len) == 0 && perf_math::write_jmp5(fn, h.target)) {
+                if (fn && std::memcmp(fn, h.prefix, h.prefix_len) == 0 && perf_math::replace_function(fn, h.hook_size, h.target)) {
                     ++patched;
                 }
             }
@@ -985,7 +1029,7 @@ inline void install_screen(HMODULE client_mod) {
                 0x0B, 0x8B, 0x51, 0x70, 0x8B, 0x71, 0x58, 0x3B, 0xD6, 0x74, 0x01, 0x48, 0x5F, 0x5E, 0xC3
             };
             if (std::memcmp(fn, kGetCursorLine, sizeof(kGetCursorLine)) == 0 &&
-                perf_math::write_jmp5(fn, reinterpret_cast<void*>(fast_richtext_get_cursor_line))) {
+                perf_math::replace_function(fn, 6, reinterpret_cast<void*>(fast_richtext_get_cursor_line))) {
                 host->log("Fast O(log N) RichText::GetCursorLine enabled (GameUI.dll+0x29250).");
             }
         }
@@ -1002,10 +1046,10 @@ inline void install_screen(HMODULE client_mod) {
         };
         int hooked = 0;
         if (std::memcmp(base + 0x1094E0, kAngleHead, sizeof(kAngleHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x1094E0, reinterpret_cast<void*>(fast_angle_matrix)))
+            perf_math::replace_function(base + 0x1094E0, 7, reinterpret_cast<void*>(fast_angle_matrix)))
             ++hooked;
         if (std::memcmp(base + 0x1090A0, kAngleHead, sizeof(kAngleHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x1090A0, reinterpret_cast<void*>(fast_angle_vectors)))
+            perf_math::replace_function(base + 0x1090A0, 7, reinterpret_cast<void*>(fast_angle_vectors)))
             ++hooked;
         if (hooked > 0) {
             char msg[128];
@@ -1039,7 +1083,7 @@ inline void install_screen(HMODULE client_mod) {
             base[0x8F987] == 0x8B && base[0x8F988] == 0x0D &&
             u32_at_equals(base + 0x8F989, reinterpret_cast<std::uintptr_t>(base) + 0x4A57D4)) {
             g_client_engine_ptr = reinterpret_cast<void* const*>(base + 0x4A57D4);
-            if (perf_math::write_jmp5(base + 0x8F960, reinterpret_cast<void*>(fast_get_anim_time_interval))) {
+            if (perf_math::replace_function(base + 0x8F960, 7, reinterpret_cast<void*>(fast_get_anim_time_interval))) {
                 host->log("NPC animation timing continuity fix enabled (client.dll+0x8F960).");
             }
         }
@@ -1055,48 +1099,39 @@ inline void install_world() {
     // 3. Strip shipped debug g_ScopeTraceStack from hot trivial CBaseEntity ops in vampire.dll
     if (enabled("fast_entity_flags", "1")) {
         int patched = 0;
-        constexpr std::uintptr_t kFlagsOffset = 0x434; // m_fFlags, as each native body reads or writes it
+        // Each hook covers test ecx,ecx; je; mov reg,[ecx+26Ch].
+        constexpr std::size_t kScopeHookSize = 10;
 
-        // 3a. CBaseEntity::GetFlags (vampire.dll+0xB3700) -> mov eax, [ecx+0x434]; ret
+        // 3a. CBaseEntity::GetFlags (vampire.dll+0xB3700)
         static const unsigned char kScopeEntHead[15] = {
             0x85, 0xC9, 0x74, 0x11, 0x8B, 0x91, 0x6C, 0x02, 0x00, 0x00, 0x85, 0xD2, 0x75, 0x0C, 0xBA
         };
-        static const unsigned char kFastGetFlags[7] = {
-            0x8B, 0x81, 0x34, 0x04, 0x00, 0x00, 0xC3
-        };
         if (std::memcmp(base + 0xB3700, kScopeEntHead, sizeof(kScopeEntHead)) == 0 &&
             u32_at_equals(base + 0xB3700 + 0x6B, kFlagsOffset) && base[0xB3700 + 0x78] == 0xC3 &&
-            write_bytes_protected(base + 0xB3700, kFastGetFlags, sizeof(kFastGetFlags)))
+            perf_math::replace_function(base + 0xB3700, kScopeHookSize, reinterpret_cast<void*>(fast_get_flags)))
             ++patched;
 
-        // 3b. CBaseEntity::AddFlag (vampire.dll+0xB3580) -> mov eax, [esp+4]; or [ecx+0x434], eax; ret 4
-        static const unsigned char kFastAddFlag[13] = {
-            0x8B, 0x44, 0x24, 0x04, 0x09, 0x81, 0x34, 0x04, 0x00, 0x00, 0xC2, 0x04, 0x00
-        };
+        // 3b. CBaseEntity::AddFlag (vampire.dll+0xB3580)
         if (std::memcmp(base + 0xB3580, kScopeEntHead, sizeof(kScopeEntHead)) == 0 &&
             u32_at_equals(base + 0xB3580 + 0x6F, kFlagsOffset) && u32_at_equals(base + 0xB3580 + 0x78, kFlagsOffset) &&
             base[0xB3580 + 131] == 0xC2 && base[0xB3580 + 132] == 0x04 && base[0xB3580 + 133] == 0x00 &&
-            write_bytes_protected(base + 0xB3580, kFastAddFlag, sizeof(kFastAddFlag)))
+            perf_math::replace_function(base + 0xB3580, kScopeHookSize, reinterpret_cast<void*>(fast_add_flag)))
             ++patched;
 
-        // 3c. CBaseEntity::RemoveFlag (vampire.dll+0xB3640) -> mov eax, [esp+4]; not eax; and [ecx+0x434], eax; ret 4
-        static const unsigned char kFastRemoveFlag[15] = {
-            0x8B, 0x44, 0x24, 0x04, 0xF7, 0xD0, 0x21, 0x81, 0x34, 0x04, 0x00, 0x00, 0xC2, 0x04, 0x00
-        };
+        // 3c. CBaseEntity::RemoveFlag (vampire.dll+0xB3640)
         if (std::memcmp(base + 0xB3640, kScopeEntHead, sizeof(kScopeEntHead)) == 0 &&
             u32_at_equals(base + 0xB3640 + 0x70, kFlagsOffset) && u32_at_equals(base + 0xB3640 + 0x7A, kFlagsOffset) &&
             base[0xB3640 + 133] == 0xC2 && base[0xB3640 + 134] == 0x04 && base[0xB3640 + 135] == 0x00 &&
-            write_bytes_protected(base + 0xB3640, kFastRemoveFlag, sizeof(kFastRemoveFlag)))
+            perf_math::replace_function(base + 0xB3640, kScopeHookSize, reinterpret_cast<void*>(fast_remove_flag)))
             ++patched;
 
-        // 3d. CBaseEntity::Relink (vampire.dll+0xB3B00): empty body except g_ScopeTraceStack -> ret
+        // 3d. CBaseEntity::Relink (vampire.dll+0xB3B00): empty body except g_ScopeTraceStack
         static const unsigned char kRelinkHead[15] = {
             0x85, 0xC9, 0x74, 0x11, 0x8B, 0x89, 0x6C, 0x02, 0x00, 0x00, 0x85, 0xC9, 0x75, 0x0C, 0xB9
         };
-        static const unsigned char kRet[1] = {0xC3};
         if (std::memcmp(base + 0xB3B00, kRelinkHead, sizeof(kRelinkHead)) == 0 &&
             base[0xB3B00 + 0x6E] == 0xC3 &&
-            write_bytes_protected(base + 0xB3B00, kRet, sizeof(kRet)))
+            perf_math::replace_function(base + 0xB3B00, kScopeHookSize, reinterpret_cast<void*>(fast_relink)))
             ++patched;
 
         if (patched > 0) {
@@ -1113,7 +1148,7 @@ inline void install_world() {
             0x14, 0x8B, 0x4C, 0x24, 0x24, 0x89, 0x44, 0x24, 0x18, 0xD9, 0x41, 0x04, 0xD8, 0x0D
         };
         if (std::memcmp(base + 0x139610, kAngleHead, sizeof(kAngleHead)) == 0 &&
-            perf_math::write_jmp5(base + 0x139610, reinterpret_cast<void*>(fast_angle_vectors)))
+            perf_math::replace_function(base + 0x139610, 7, reinterpret_cast<void*>(fast_angle_vectors)))
             host->log("Fast SSE2 AngleVectors enabled (vampire.dll+0x139610).");
     }
 }

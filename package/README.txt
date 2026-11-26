@@ -1,4 +1,4 @@
-Engine Fixes and Tweaks 1.3
+Engine Fixes and Tweaks 1.3.1
 for Vampire: The Masquerade - Bloodlines
 ==========================================
 

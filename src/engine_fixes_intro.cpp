@@ -339,7 +339,7 @@ extern "C" __declspec(dllexport) void __cdecl loaded_engine() {
     }
     // Raw QueryPerformanceCounter origin of this log's clock, so its lines can be aligned
     // exactly with engine_fixes' startup report (trace_origin_qpc, same system-wide counter).
-    char anchor[160]; sprintf_s(anchor,"loaded_engine: Engine Fixes and Tweaks intro companion 1.3 (qpc_origin=%lld qpc_frequency=%lld)",origin.QuadPart,frequency.QuadPart);
+    char anchor[160]; sprintf_s(anchor,"loaded_engine: Engine Fixes and Tweaks intro companion 1.3.1 (qpc_origin=%lld qpc_frequency=%lld)",origin.QuadPart,frequency.QuadPart);
     log(anchor);
     auto engine=GetModuleHandleW(L"engine.dll");
     if(enabled && base==reinterpret_cast<std::uintptr_t>(engine)) {

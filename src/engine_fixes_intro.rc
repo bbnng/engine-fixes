@@ -2,8 +2,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,3,0,0
- PRODUCTVERSION 1,3,0,0
+ FILEVERSION 1,3,1,0
+ PRODUCTVERSION 1,3,1,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0
  FILEOS VOS_NT_WINDOWS32
@@ -16,12 +16,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "bigbannng"
             VALUE "FileDescription", "Engine Fixes and Tweaks - startup companion for Vampire: The Masquerade - Bloodlines"
-            VALUE "FileVersion", "1.3.0.0"
+            VALUE "FileVersion", "1.3.1.0"
             VALUE "InternalName", "engine_fixes_intro"
             VALUE "LegalCopyright", "Copyright (c) 2026 bigbannng. GPL-3.0-only with additional terms."
             VALUE "OriginalFilename", "engine_fixes_intro.vtm"
             VALUE "ProductName", "Engine Fixes and Tweaks"
-            VALUE "ProductVersion", "1.3"
+            VALUE "ProductVersion", "1.3.1"
             VALUE "Comments", "Open source: https://github.com/bbnng/engine-fixes"
         END
     END

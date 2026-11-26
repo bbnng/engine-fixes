@@ -18,7 +18,7 @@
 #include "build_check.h"
 #pragma comment(lib, "bcrypt.lib")
 
-BLSE_PLUGIN_INFO("engine_fixes", "1.3", "Engine Fixes and Tweaks", "Engine and game-code bug fixes for Bloodlines, faster startup and loading, plus optional tweaks", "0.6.1", nullptr);
+BLSE_PLUGIN_INFO("engine_fixes", "1.3.1", "Engine Fixes and Tweaks", "Engine and game-code bug fixes for Bloodlines, faster startup and loading, plus optional tweaks", "0.6.1", nullptr);
 
 namespace {
 const BLSE_HostAPI* host;
@@ -585,7 +585,7 @@ void BLSE_CALL start_when_ready(const char*, const void*, size_t, void*) {
     if (world) install_eye_glance(); // [EyeGlances] enabled=1/0
     if (screen) knox_eyes::install(); // [Tweaks] knox_relaxed_eyes
     perf_math::install(); // [Performance] fast_math, fast_memcpy, fast_stricmp across loaded game DLLs
-    perf_runtime::install_common(); // [Performance] fast_timer (tier0.dll Plat_FloatTime)
+    perf_runtime::install_common(); // [Performance] fast_timer, fast_cvar_lookup, fast_delta_bits, fast_prop_codec, fast_vstdlib
     if (screen) perf_runtime::install_screen(GetModuleHandleW(L"client.dll"));
     if (world) perf_runtime::install_world();
     if (!shutdown_subscribed) shutdown_subscribed = host->subscribe(host->context, BLSE_MSG_LEVEL_SHUTDOWN, reset_npc_state, nullptr) != 0;

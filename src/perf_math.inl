@@ -11,7 +11,8 @@
 //
 // Each replacement preserves every required register, EFLAGS (for _CI* intrinsics), and the x87
 // FPU control word, and produces IEEE-754 results (including -0.0, subnormals, +/-Inf, and NaN).
-// Every site is verified by exact instruction bytes before patching.
+// Every site is verified by exact instruction bytes, then hooked through BLSE (host->hook_function),
+// which records the patch and refuses one that overlaps another plugin's.
 
 #include <intrin.h>
 #include <cmath>
@@ -192,16 +193,26 @@ inline int __cdecl fast_stricmp(const char* a, const char* b) {
     }
 }
 
-inline bool write_jmp5(unsigned char* site, void* target) {
-    DWORD old_prot = 0;
-    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old_prot)) return false;
-    const std::int32_t rel = static_cast<std::int32_t>(
-        reinterpret_cast<std::uintptr_t>(target) - (reinterpret_cast<std::uintptr_t>(site) + 5));
-    site[0] = 0xE9;
-    std::memcpy(site + 1, &rel, 4);
-    VirtualProtect(site, 5, old_prot, &old_prot);
-    FlushInstructionCache(GetCurrentProcess(), site, 5);
-    return true;
+// Replaces the function at `site` (its code already verified by the caller) with `replacement`.
+// `size`: the whole instructions that the 5-byte jump covers (5..16). Some of them are relative
+// branches, which do not work once moved into BLSE's trampoline: the replacements here are complete
+// and never call the original, so the trampoline is not used.
+inline bool replace_function(unsigned char* site, std::size_t size, void* replacement) {
+    unsigned char expected[16];
+    if (!site || !replacement || !host || !host->hook_function || size < 5 || size > sizeof(expected)) return false;
+    std::memcpy(expected, site, size);
+    void* trampoline = nullptr;
+    return host->hook_function(host->context, site, expected, size, replacement, &trampoline) == BLSE_HOOK_OK;
+}
+
+// Hooks a matched pair atomically: if the second hook is refused (e.g. conflict with another
+// plugin), the first hook is undone so the pair never stays half-patched.
+inline bool replace_function_pair(unsigned char* site1, std::size_t size1, void* replacement1,
+                                  unsigned char* site2, std::size_t size2, void* replacement2) {
+    if (!replace_function(site1, size1, replacement1)) return false;
+    if (replace_function(site2, size2, replacement2)) return true;
+    if (host && host->unhook) host->unhook(host->context, site1);
+    return false;
 }
 
 inline bool find_text_section(HMODULE mod, unsigned char*& out_start, std::size_t& out_size, std::uintptr_t& out_img_end) {
@@ -281,9 +292,9 @@ inline ModulePatchStats patch_module(HMODULE mod, const CpuCaps& caps, bool do_m
             if (std::memcmp(reinterpret_cast<const void*>(target), kCtrlFp, sizeof(kCtrlFp)) != 0) continue;
             const std::uint32_t cw_val = *reinterpret_cast<const std::uint32_t*>(static_cast<std::uintptr_t>(cw_va));
             if (cw_val == 0x173Fu) {
-                if (write_jmp5(text + i, reinterpret_cast<void*>(fast_floor_sse41))) ++st.floors;
+                if (replace_function(text + i, 5, reinterpret_cast<void*>(fast_floor_sse41))) ++st.floors;
             } else if (cw_val == 0x1B3Fu) {
-                if (write_jmp5(text + i, reinterpret_cast<void*>(fast_ceil_sse41))) ++st.ceils;
+                if (replace_function(text + i, 5, reinterpret_cast<void*>(fast_ceil_sse41))) ++st.ceils;
             }
         }
     }
@@ -360,7 +371,8 @@ inline ModulePatchStats patch_module(HMODULE mod, const CpuCaps& caps, bool do_m
             }
 
             if (ci_dst && fn_dst) {
-                if (write_jmp5(text + i, ci_dst) && write_jmp5(text + i + 20, fn_dst)) {
+                // sub esp,8; fst qword ptr [esp] / lea edx,[esp+4]; call
+                if (replace_function_pair(text + i, 6, ci_dst, text + i + 20, 9, fn_dst)) {
                     if (is_sqrt) ++st.sqrts;
                     else ++st.trans;
                 }
@@ -378,8 +390,9 @@ inline ModulePatchStats patch_module(HMODULE mod, const CpuCaps& caps, bool do_m
             if (std::memcmp(text + i, kPowHead, sizeof(kPowHead)) != 0) continue;
             if (std::memcmp(text + i + 41, kCwCmp, sizeof(kCwCmp)) != 0) continue;
             if (std::memcmp(text + i + 54, kPowMask, sizeof(kPowMask)) != 0) continue;
-            if (write_jmp5(text + i, reinterpret_cast<void*>(fast_cipow)) &&
-                write_jmp5(text + i + 25, reinterpret_cast<void*>(ucrt_pow))) {
+            // sub esp,10h; fxch st(1) / lea edx,[esp+0Ch]; call
+            if (replace_function_pair(text + i, 5, reinterpret_cast<void*>(fast_cipow),
+                                      text + i + 25, 9, reinterpret_cast<void*>(ucrt_pow))) {
                 ++st.trans;
             }
         }
@@ -396,7 +409,7 @@ inline ModulePatchStats patch_module(HMODULE mod, const CpuCaps& caps, bool do_m
         for (std::size_t i = 0; i + sizeof(kMemmove) <= text_size; ++i) {
             if (text[i] != 0x55 || text[i + 3] != 0x57) continue;
             if (std::memcmp(text + i, kMemmove, sizeof(kMemmove)) != 0) continue;
-            if (write_jmp5(text + i, reinterpret_cast<void*>(modern_memmove))) ++st.memmoves;
+            if (replace_function(text + i, 5, reinterpret_cast<void*>(modern_memmove))) ++st.memmoves;
         }
     }
 
@@ -412,7 +425,7 @@ inline ModulePatchStats patch_module(HMODULE mod, const CpuCaps& caps, bool do_m
             if (text[i] != 0x55 || text[i + 5] != 0x53) continue;
             if (std::memcmp(text + i, kStricmpHead, sizeof(kStricmpHead)) != 0) continue;
             if (std::memcmp(text + i + 32, kStricmpLoop, sizeof(kStricmpLoop)) != 0) continue;
-            if (write_jmp5(text + i, reinterpret_cast<void*>(fast_stricmp))) ++st.stricmps;
+            if (replace_function(text + i, 5, reinterpret_cast<void*>(fast_stricmp))) ++st.stricmps;
         }
     }
 
